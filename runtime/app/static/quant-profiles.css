@@ -1,0 +1,51 @@
+.risk-profile-control {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 420px);
+  align-items: center;
+  gap: 12px;
+  color: #76909a;
+  font-size: 11px;
+}
+
+.risk-profile-segments {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  height: 38px;
+  overflow: hidden;
+  border: 1px solid #31505b;
+  border-radius: 5px;
+  background: #08151e;
+}
+
+.risk-profile-segments button {
+  border: 0;
+  border-right: 1px solid #31505b;
+  background: transparent;
+  color: #9bb0b7;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.risk-profile-segments button:last-child { border-right: 0; }
+.risk-profile-segments button.active {
+  background: #1b493f;
+  color: #eafff8;
+  box-shadow: inset 0 -2px #31d6a0;
+}
+
+.quant-ranking-table td:last-child { min-width: 170px; }
+.quant-ranking-table td:last-child small {
+  display: block;
+  max-width: 260px;
+  margin-top: 3px;
+  color: #738d96;
+  white-space: normal;
+}
+.rank-pass { color: #70d9bb; }
+.rank-watch { color: #d5b871; }
+
+@media (max-width: 700px) {
+  .risk-profile-control { grid-template-columns: 1fr; }
+}

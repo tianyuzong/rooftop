@@ -1,0 +1,6 @@
+interface:
+  display_name: "Argus A股量化研究"
+  short_description: "A股选股、回测、舆情与每日策略自进化"
+  default_prompt: "使用 $stock-comparison-visualizer 按本金、周期、风险约束和股票池运行 A 股量化研究。"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23071019%22/><path d=%22M7 23L16 6l9 17-9-5z%22 fill=%22%2331d6a0%22/></svg>">
+  <meta name="color-scheme" content="dark">
+  <title>Argus · 投资研究台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/quant-profiles.css">
+  <link rel="stylesheet" href="/stock-compare.css">
+  <link rel="stylesheet" href="/contrast.css">
+  <link rel="stylesheet" href="/logic.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="Argus 首页">
+        <span class="brand-mark">A</span>
+        <span><strong>ARGUS</strong><small>MARKET INTELLIGENCE</small></span>
+      </a>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="signals"><span>!</span> 信号中心</button>
+        <button class="nav-item" data-view="compare"><span>↔</span> 股票对比</button>
+        <button class="nav-item" data-view="overview"><span>◫</span> 市场总览</button>
+        <button class="nav-item" data-view="library"><span>⌕</span> 资料搜索</button>
+        <button class="nav-item" data-view="logic"><span>⌁</span> 推荐怎么算</button>
+        <button class="nav-item" data-view="harness"><span>◎</span> 股票推荐</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="system-state"><i></i><span>本地系统正常<small>SQLite · 真实 ETF 日线</small></span></div>
+        <p>仅用于分析，不连接券商<br>不构成任何投资建议</p>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">A 股研究工具</p>
+          <h1 id="pageTitle">信号中心</h1>
+        </div>
+        <div class="top-actions">
+          <div class="asof"><span>数据时点</span><strong id="asOf">—</strong></div>
+          <span id="dataMode" class="demo-pill">● 本地数据 · 日线</span>
+          <button id="notificationButton" class="icon-button" type="button" aria-label="打开信号中心" title="打开信号中心">◌<b id="notificationBadge">0</b></button>
+        </div>
+      </header>
+
+      <section id="warning" class="warning-strip" role="status">正在载入本地分析数据…</section>
+
+      <div id="signalsView" class="view active">
+        <section class="signal-summary" aria-labelledby="signalsHeading">
+          <div>
+            <p class="eyebrow">POST-CLOSE RESEARCH SIGNALS</p>
+            <h2 id="signalsHeading">盘后研究信号</h2>
+            <p>所有信号均需人工复核。系统不会连接券商，也不会自动下单。</p>
+          </div>
+          <div class="signal-kpis">
+            <span>待复核<strong id="signalUnread">0</strong></span>
+            <span>通知队列<strong id="signalQueued">0</strong></span>
+            <span>启用订阅<strong id="signalSubscriptions">0</strong></span>
+          </div>
+        </section>
+
+        <section class="signal-layout">
+          <div class="signal-feed-band">
+            <div class="panel-head"><div><p class="eyebrow">SIGNAL FEED</p><h2>买入、卖出与调仓提醒</h2></div><button id="refreshSignals" class="secondary-button" type="button">刷新</button></div>
+            <div id="signalFeed" class="signal-feed"><div class="search-loading">正在读取盘后信号…</div></div>
+          </div>
+          <aside class="notification-band">
+            <div class="panel-head"><div><p class="eyebrow">NOTIFICATIONS</p><h2>邮件订阅</h2></div><span class="lock">只读交易</span></div>
+            <form id="subscriptionForm" class="subscription-form">
+              <label>订阅名称<input id="subscriptionName" value="盘后信号提醒" required></label>
+              <label>收件邮箱<input id="subscriptionTarget" type="email" placeholder="research@example.com" required></label>
+              <fieldset><legend>提醒类型</legend><label><input type="checkbox" name="signalEvent" value="BUY" checked> 买入</label><label><input type="checkbox" name="signalEvent" value="SELL" checked> 卖出</label><label><input type="checkbox" name="signalEvent" value="REBALANCE" checked> 调仓</label></fieldset>
+              <label>最低置信度<input id="subscriptionConfidence" type="number" min="0" max="100" value="0"><small>0–100%</small></label>
+              <button class="primary-button" type="submit">保存订阅</button>
+            </form>
+            <div id="subscriptionList" class="subscription-list"></div>
+          </aside>
+        </section>
+
+        <details class="model-registry-band professional-disclosure">
+          <summary>专业数据与模型管理</summary>
+          <div class="model-registry-body">
+            <form id="modelForm" class="model-form">
+              <label>模型键<input id="modelKey" placeholder="valuation.baijiu" required></label>
+              <label>类型<select id="modelKind"><option value="financial">财务</option><option value="valuation" selected>估值</option><option value="factor">因子</option><option value="strategy">策略</option><option value="risk">风控</option></select></label>
+              <label>名称<input id="modelName" placeholder="白酒估值模型" required></label>
+              <label>版本<input id="modelVersion" value="1.0.0" required></label>
+              <label>维护人<input id="modelCreatedBy" placeholder="姓名" required></label>
+              <label>风险档位<select id="modelProfile"><option value="">通用</option><option value="balanced">均衡</option><option value="aggressive">激进</option><option value="conservative">保守</option></select></label>
+              <label class="model-spec-field">声明式 JSON<textarea id="modelSpecification" rows="7">{"dimensions":{"value":[{"field":"valuation.pe_ttm","low":8,"high":60,"inverse":true}]}}</textarea></label>
+              <button class="primary-button" type="submit">创建草稿版本</button>
+            </form>
+            <form id="modelActivationForm" class="model-activation-form">
+              <label>模型版本<select id="activationModelId" required></select></label>
+              <label>作用范围<select id="activationScope"><option value="DEFAULT">默认</option><option value="INDUSTRY">行业</option><option value="SYMBOL">个股</option></select></label>
+              <label>范围值<input id="activationScopeValue" value="*" placeholder="白酒或 600519"></label>
+              <label>风险档位<select id="activationProfile"><option value="">沿用模型</option><option value="balanced">均衡</option><option value="aggressive">激进</option><option value="conservative">保守</option></select></label>
+              <label>批准人<input id="activationApprovedBy" placeholder="复核人姓名" required></label>
+              <button class="secondary-button" type="submit">确认并激活</button>
+            </form>
+            <div id="modelRegistry" class="model-registry"></div>
+          </div>
+        </details>
+      </div>
+
+      <div id="compareView" class="view">
+        <section class="compare-command" aria-labelledby="compareHeading">
+          <div class="compare-command-title">
+            <p class="eyebrow">STOCK COMPARISON</p>
+            <h2 id="compareHeading">股票对比决策台</h2>
+            <span id="compareAsOf" class="compare-asof">等待数据</span>
+          </div>
+          <form id="compareForm" class="compare-form">
+            <label class="stock-entry">
+              <span>股票名称或代码</span>
+              <input id="compareStocks" name="stocks" value="贵州茅台，五粮液，宁德时代" autocomplete="off" placeholder="至少两只，用逗号分隔">
+            </label>
+            <fieldset class="profile-selector">
+              <legend>投资态度</legend>
+              <label class="profile-option"><input type="radio" name="profile" value="aggressive"><span>激进派<small>增长 · 动量</small></span></label>
+              <label class="profile-option"><input type="radio" name="profile" value="balanced" checked><span>中间派<small>质量 · 估值</small></span></label>
+              <label class="profile-option"><input type="radio" name="profile" value="conservative"><span>保守派<small>现金流 · 下行</small></span></label>
+            </fieldset>
+            <button id="compareSubmit" class="compare-submit" type="submit"><span aria-hidden="true">↗</span> 开始对比</button>
+          </form>
+        </section>
+
+        <div id="compareStatus" class="compare-status" role="status">等待对比任务</div>
+        <div id="compareResults" class="compare-results" hidden>
+          <section id="compareVerdict" class="compare-verdict"></section>
+          <section class="compare-visuals">
+            <article class="compare-visual-panel">
+              <div class="compare-section-head"><div><p class="eyebrow">PROFILE MAP</p><h3>多维评分画像</h3></div><div id="radarLegend" class="compare-legend"></div></div>
+              <canvas id="radarChart" aria-label="股票多维评分雷达图"></canvas>
+            </article>
+            <article class="compare-visual-panel">
+              <div class="compare-section-head"><div><p class="eyebrow">BACKTEST</p><h3>策略历史回放</h3></div><div id="curveLegend" class="compare-legend"></div></div>
+              <canvas id="backtestChart" aria-label="股票策略历史回放曲线"></canvas>
+            </article>
+          </section>
+          <section id="compareTable" class="compare-table-section"></section>
+          <section id="compareCards" class="compare-stock-grid"></section>
+          <section id="compareMethod" class="compare-method"></section>
+        </div>
+      </div>
+
+      <div id="overviewView" class="view">
+        <section class="summary-grid">
+          <article class="metric-card">
+            <span>持仓市值</span><strong id="portfolioValue">—</strong><small id="portfolioValueDetail">未录入真实持仓</small>
+          </article>
+          <article class="metric-card">
+            <span>浮动盈亏</span><strong id="portfolioPnl">—</strong><small id="portfolioPnlDetail">无持仓时不计算</small>
+          </article>
+          <article class="metric-card">
+            <span>风险提示</span><strong id="disciplineState">—</strong><small id="disciplineDetail">等待计算</small>
+          </article>
+          <article class="metric-card accent">
+            <span>持仓数据</span><strong id="portfolioSourceState">未导入</strong><small id="portfolioSourceDetail">仅接受用户确认的数据</small>
+          </article>
+        </section>
+
+        <section class="main-grid">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">股票行情</p><h2>价格走势和风险线 <small id="chartFrequency">日频 · 本地缓存</small></h2></div>
+              <form id="assetLookupForm" class="asset-picker">
+                <label for="assetInput">查看股票</label>
+                <input id="assetInput" list="assetSuggestions" autocomplete="off" placeholder="名称或6位代码" aria-label="输入股票名称或代码">
+                <datalist id="assetSuggestions"></datalist>
+                <button id="assetLookupButton" type="submit">查看</button>
+              </form>
+            </div>
+            <div class="chart-toolbar">
+              <div id="periodSelector" class="period-selector" aria-label="图表周期"></div>
+              <label>涨跌颜色<select id="colorConvention"><option value="redUp">红涨绿跌</option><option value="greenUp">绿涨红跌</option></select></label>
+            </div>
+            <div class="quote-row">
+              <div><span id="assetName">—</span><strong id="assetPrice">—</strong></div>
+              <span id="assetPnl" class="change-pill">—</span>
+              <div class="legend"><span class="current">价格</span><span class="cost">成本线</span><span class="stop">止损红线</span><span class="profit">止盈线</span></div>
+            </div>
+            <div id="chart" class="chart" role="img" aria-label="价格走势和风险线"></div>
+            <p class="chart-help">鼠标滚轮缩放横轴 · 按住左键拖动 · 悬停查看涨跌/OHLC/换手/量额/区间涨幅 · 右侧筹码分布为量价估算</p>
+            <div class="chart-foot">
+              <span id="volatility">年化波动 —</span><span id="drawdown">最大回撤 —</span><span id="momentum">20日动量 —</span>
+            </div>
+          </article>
+
+          <aside class="panel discipline-panel">
+            <div class="panel-head"><div><p class="eyebrow">风险检查</p><h2>价格风险提示</h2></div><span class="lock">只读</span></div>
+            <div id="disciplineCard" class="discipline-card"></div>
+            <div class="line-list" id="lineList"></div>
+            <button id="recheckButton" class="primary-button">重新检查风险</button>
+            <p class="fine-print">模型输出是研究提示，不代替人工决策。系统不会下单。</p>
+          </aside>
+        </section>
+
+        <section class="lower-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">真实账户</p><h2>我持有的股票</h2></div><div class="position-actions"><span class="count" id="positionCount">0 项</span><button id="portfolioImportOpen" class="secondary-button" type="button">导入持仓</button><button id="portfolioClear" class="icon-button" type="button" title="清空当前真实持仓" aria-label="清空当前真实持仓" hidden>×</button></div></div>
+            <div id="portfolioMeta" class="portfolio-meta" aria-live="polite">尚未导入真实持仓</div>
+            <div class="table-wrap"><table><thead><tr><th>股票</th><th>数量</th><th>市值</th><th>盈亏</th><th>风险提示</th></tr></thead><tbody id="positionsBody"></tbody></table></div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">RESEARCH QUEUE</p><h2>待验证假设</h2></div><div class="research-coverage"><span>证据覆盖度</span><strong id="evidenceCoverage">暂无</strong><small id="evidenceCoverageDetail">尚无可计算的研究报告</small></div></div>
+            <div id="hypothesisList" class="hypothesis-list"></div>
+          </article>
+        </section>
+      </div>
+
+      <div id="libraryView" class="view placeholder-view"></div>
+      <div id="logicView" class="view placeholder-view"></div>
+      <div id="harnessView" class="view placeholder-view"></div>
+    </main>
+  </div>
+  <dialog id="portfolioImportDialog" class="portfolio-dialog" aria-labelledby="portfolioImportTitle">
+    <form id="portfolioImportForm">
+      <header class="portfolio-dialog-head">
+        <div><p class="eyebrow">LOCAL PORTFOLIO</p><h2 id="portfolioImportTitle">导入真实持仓</h2></div>
+        <button id="portfolioImportClose" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+      </header>
+      <p class="portfolio-privacy">数据只保存在本机。导入仅用于估值、研究和提醒，不连接券商、不执行交易。</p>
+      <div class="portfolio-mode" role="tablist" aria-label="导入方式">
+        <button type="button" role="tab" class="active" data-portfolio-mode="manual" aria-selected="true">手工录入</button>
+        <button type="button" role="tab" data-portfolio-mode="csv" aria-selected="false">CSV 导入</button>
+      </div>
+      <div class="portfolio-common-fields">
+        <label>账户名称<input id="portfolioAccountName" maxlength="80" value="我的本地账户" required></label>
+        <label>持仓日期<input id="portfolioAsOf" type="date" required></label>
+      </div>
+      <section id="portfolioManualPane" class="portfolio-input-pane">
+        <div class="portfolio-pane-head"><strong>持仓明细</strong><button id="portfolioAddRow" class="secondary-button" type="button">+ 添加一行</button></div>
+        <div class="table-wrap"><table class="portfolio-entry-table"><thead><tr><th>股票代码</th><th>股票名称（可选）</th><th>数量（股）</th><th>成本价</th><th></th></tr></thead><tbody id="portfolioManualRows"></tbody></table></div>
+      </section>
+      <section id="portfolioCsvPane" class="portfolio-input-pane" hidden>
+        <div class="portfolio-csv-grid">
+          <label>选择 CSV 文件<input id="portfolioCsvFile" type="file" accept=".csv,text/csv"></label>
+          <label>文件编码<select id="portfolioCsvEncoding"><option value="UTF-8">UTF-8</option><option value="GB18030">GB18030 / GBK</option></select></label>
+          <button id="portfolioTemplateDownload" class="secondary-button" type="button">下载模板</button>
+        </div>
+        <p>必要列：股票代码、持仓数量、成本价；股票名称可以省略。</p>
+      </section>
+      <div id="portfolioImportErrors" class="portfolio-import-errors" role="alert" hidden></div>
+      <section id="portfolioPreview" class="portfolio-preview" hidden>
+        <div class="portfolio-preview-summary" id="portfolioPreviewSummary"></div>
+        <div class="table-wrap"><table><thead><tr><th>股票</th><th>数量</th><th>成本价</th><th>行情核验</th></tr></thead><tbody id="portfolioPreviewRows"></tbody></table></div>
+        <p>确认后将以本次快照替换当前真实持仓；历史导入记录保留用于对账。</p>
+      </section>
+      <footer class="portfolio-dialog-actions">
+        <button id="portfolioCancel" class="secondary-button" type="button">取消</button>
+        <button id="portfolioPreviewButton" class="primary-button" type="submit">预览并对账</button>
+        <button id="portfolioConfirmButton" class="primary-button" type="button" hidden>确认写入</button>
+      </footer>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js" defer></script>
+  <script src="/stock-compare.js" defer></script>
+</body>
+</html>

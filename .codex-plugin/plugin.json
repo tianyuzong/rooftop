@@ -1,0 +1,25 @@
+{
+  "name": "argus-stock-comparison",
+  "version": "1.0.0+codex.20260901110135",
+  "description": "A-share research signals, constrained portfolios, versioned financial models, email notifications, backtests, and gated daily evolution.",
+  "author": {
+    "name": "TianyuZong"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Argus \u7814\u7a76\u4fe1\u53f7",
+    "shortDescription": "A-share research signals, models, backtests, and notifications.",
+    "longDescription": "Build constrained A-share research portfolios, run chronological holdout backtests, activate versioned financial and valuation models, publish review-only buy, sell, and rebalance signals, and deliver opt-in email notifications. Argus never connects to a broker or executes orders.",
+    "developerName": "TianyuZong",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "\u7528\u4e2d\u95f4\u6d3e\u6bd4\u8f83\u8d35\u5dde\u8305\u53f0\u3001\u4e94\u7cae\u6db2\u548c\u5b81\u5fb7\u65f6\u4ee3",
+      "\u672c\u91d110\u4e07\u5143\u3001\u671f\u965012\u4e2a\u6708\u3001\u6700\u5927\u56de\u64a415%\u3001\u6b62\u635f8%\u3001\u6d6e\u52a8\u6b62\u76c820%\uff0c\u4ece\u767d\u9152\u548c\u65b0\u80fd\u6e90\u677f\u5757\u81ea\u52a8\u9009\u80a1\u5e76\u67e5\u770b\u6700\u8fd1\u76d8\u540e\u53d1\u5e03\u7684\u91cf\u5316\u7ec4\u5408",
+      "\u7528\u6fc0\u8fdb\u6d3e\u6bd4\u8f83 300750\u3001601127\u3001002594"
+    ],
+    "brandColor": "#31D6A0"
+  }
+}

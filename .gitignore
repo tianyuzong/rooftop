@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local interpreter pointers
+.venv/
+venv/
+env/
+runtime/.venv-path
+
+# Runtime state: may contain market data, research documents, email targets, or tokens
+runtime/data_lake/
+data_lake/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Model artifacts and generated packages
+*.pt
+*.pth
+*.safetensors
+*.onnx
+dist/
+MANIFEST.sha256
+PACKAGE-SNAPSHOT.json
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+secrets/
+
+# Logs, temporary files, and editor metadata
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

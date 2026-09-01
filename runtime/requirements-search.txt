@@ -1,0 +1,3 @@
+# RTX 5080 / Blackwell: install the matching PyTorch CUDA wheel first; see docs/SEARCH.md.
+sentence-transformers>=5.1,<6
+transformers>=4.51,<6

@@ -1,0 +1,11 @@
+{
+  "name": "argus-stock-comparison",
+  "version": "1.0.0+codex.20260901110135",
+  "description": "A 股盘后研究信号、约束选股、版本化财务模型、邮件提醒和样本外回测。",
+  "author": {
+    "name": "TianyuZong"
+  },
+  "license": "MIT",
+  "skills": "skills",
+  "commands": "commands"
+}

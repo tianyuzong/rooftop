@@ -1,0 +1,3 @@
+-r requirements-data.txt
+akquant==0.3.38
+PyYAML==6.0.3

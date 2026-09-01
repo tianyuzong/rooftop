@@ -1,0 +1,4 @@
+# Pinned because AKShare frequently changes adapters and schemas.
+akshare==1.18.84
+baostock==0.9.3
+tdxrs==0.6.7
