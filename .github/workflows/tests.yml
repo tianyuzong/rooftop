@@ -24,6 +24,8 @@ jobs:
             runtime/requirements-stock-comparison.txt
       - name: Install core dependencies
         run: python -m pip install --disable-pip-version-check -r runtime/requirements-stock-comparison.txt
+      - name: Install CPU PyTorch for model tests
+        run: python -m pip install --disable-pip-version-check --index-url https://download.pytorch.org/whl/cpu torch
       - name: Run public release audit
         shell: pwsh
         run: ./scripts/check_public_release.ps1
