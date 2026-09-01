@@ -33,6 +33,15 @@ class ContentDisclosureContractTests(unittest.TestCase):
             source = self.index if marker.startswith("model-registry") else self.app
             self.assertIn(marker, source)
 
+    def test_readability_layer_loads_last_and_raises_small_text_floor(self):
+        self.assertGreater(
+            self.index.index('href="/contrast.css"'),
+            self.index.index('href="/logic.css"'),
+        )
+        self.assertIn("Final readability layer", self.contrast)
+        self.assertIn("font-size: 13px !important", self.contrast)
+        self.assertIn("outline: 2px solid var(--cyan)", self.contrast)
+
 
 if __name__ == "__main__":
     unittest.main()

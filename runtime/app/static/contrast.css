@@ -217,9 +217,176 @@ td strong { color: #fff; }
   .credibility-metrics { grid-template-columns: 1fr; }
   .topbar { height: auto; min-height: 76px; padding: 10px 0; align-items: flex-start; flex-direction: column; justify-content: center; }
   .topbar > div:first-child { min-width: 0; width: 100%; }
-  .topbar h1 { white-space: nowrap; }
+  .topbar h1 { white-space: normal; overflow-wrap: anywhere; }
   .top-actions { width: 100%; gap: 6px; justify-content: flex-start; }
   .top-actions .demo-pill { max-width: 100%; white-space: normal; line-height: 1.4; }
   .top-actions .asof,
   .top-actions .icon-button { display: none; }
+}
+
+/* Final readability layer: contrast.css is intentionally loaded last. */
+:root {
+  --bg: #040b10;
+  --panel: #0b1922;
+  --panel-2: #10242e;
+  --line: #587581;
+  --text: #f8fbfc;
+  --muted: #c7d4d7;
+  --green: #68edbf;
+  --green-dim: #185044;
+  --red: #ff929d;
+  --amber: #ffda86;
+  --blue: #a4caff;
+  --cyan: #a1f0f2;
+  --shadow: 0 18px 44px rgba(0, 0, 0, .34);
+}
+
+html { font-size: 16px; }
+body { color: var(--text); font-size: 16px; line-height: 1.5; }
+
+.topbar h1 { font-size: 26px; white-space: nowrap; }
+.panel h2,
+.library-search h2,
+.logic-intro h2,
+.logic-section-head h2 { font-size: 19px; line-height: 1.35; }
+.panel h3,
+.feature-card h3,
+.hypothesis h3 { font-size: 16px; line-height: 1.4; }
+.nav-item { color: #d1dcdf; font-size: 17px; }
+.method-button,
+.system-state { font-size: 15px; }
+.brand small { font-size: 11px !important; }
+
+body [class] small {
+  color: #c2d0d3;
+  font-size: 13px !important;
+  line-height: 1.5;
+}
+body [class] p {
+  color: #c4d0d3;
+  font-size: 14px !important;
+  line-height: 1.65;
+}
+body [class] label {
+  color: #d0dbde;
+  font-size: 14px !important;
+  line-height: 1.45;
+}
+
+input,
+select,
+textarea,
+.search-panel input,
+.stock-entry input,
+.harness-form input,
+.harness-form select,
+.harness-form textarea,
+.agent-launch-form input,
+.agent-launch-form select,
+.decision-form input,
+.decision-options input,
+.decision-options select,
+.report-stock-loader input {
+  min-height: 42px;
+  border-color: #6a8994 !important;
+  background: #081923 !important;
+  color: #fff !important;
+  font-size: 15px !important;
+  line-height: 1.35;
+}
+input::placeholder,
+textarea::placeholder { color: #b2c2c6; }
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.primary-button,
+.secondary-button,
+.period-button {
+  min-height: 40px;
+  font-size: 14px !important;
+  line-height: 1.35;
+}
+.primary-button { color: #031712; }
+.secondary-button,
+.period-button { border-color: #6a8994; color: #e6edef; background: #10242e; }
+.demo-pill,
+.count,
+.lock,
+.status-tag,
+.change-pill,
+.feature-card .badge,
+.harness-row .badge { font-size: 13px !important; line-height: 1.35; }
+
+.warning-strip { border-color: #85682f; background: #282012; color: #ffe29f; font-size: 14px; line-height: 1.55; }
+.tape-item span,
+.tape-item small,
+.tape-item em,
+.asset-picker,
+.legend,
+.line-row,
+.source-card,
+.compare-section-head > span,
+.stock-facts span,
+.dimension-row,
+.compare-stock-card footer { font-size: 13px !important; line-height: 1.45; }
+.tape-item strong { font-size: 17px; }
+.metric-card > span,
+.metric-card small { font-size: 14px !important; }
+.metric-card strong { font-size: 26px; }
+.quote-row > div:first-child span { font-size: 14px; }
+.quote-row > div:first-child strong { font-size: 32px; }
+
+table,
+th,
+td { font-size: 14px !important; line-height: 1.5; }
+th { color: #d4dee0; font-weight: 600; }
+td { color: #e3eaec; }
+td strong { font-size: 15px !important; }
+
+.chart-tooltip { border-color: #6a8994; background: rgba(3, 12, 18, .97); font-size: 13px; }
+.chart-hover-stats,
+.chip-footer { font-size: 12px; }
+.chart text,
+.indicator-panel text,
+.chart .chip-axis-label { font-size: 13px !important; }
+.chart-help,
+.chart-foot { color: #d5e0e2; font-size: 13px !important; line-height: 1.5; }
+
+.panel,
+.compare-visual-panel,
+.compare-verdict,
+.compare-stock-card,
+.metric-card,
+.discipline-card,
+.feature-card,
+.source-card,
+.factor-card,
+.learning-stage,
+.sector-cache-strip,
+.quant-metrics,
+.risk-profile-segments,
+.professional-disclosure,
+.audit-details { border-color: var(--line); }
+.panel,
+.compare-visual-panel,
+.compare-stock-card { background-color: var(--panel); }
+.positive { color: var(--green) !important; }
+.negative { color: var(--red) !important; }
+
+@media (min-width: 841px) and (max-width: 1100px) {
+  .top-actions .asof { display: none; }
+}
+
+@media (max-width: 840px) {
+  .nav-item { font-size: 15px; }
+  .topbar h1 { font-size: 23px; white-space: normal; overflow-wrap: anywhere; }
+  .panel h2 { font-size: 18px; }
+  main { padding-left: 16px; padding-right: 16px; }
 }

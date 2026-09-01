@@ -1,6 +1,6 @@
 {
   "name": "argus-stock-comparison",
-  "version": "1.0.0+codex.20260901110135",
+  "version": "1.0.0+codex.20260901162755",
   "description": "A-share research signals, constrained portfolios, versioned financial models, email notifications, backtests, and gated daily evolution.",
   "author": {
     "name": "TianyuZong"
