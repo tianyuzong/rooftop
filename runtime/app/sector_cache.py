@@ -11,8 +11,9 @@ import json
 import os
 import threading
 from contextlib import closing
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 from .db import connect, initialize
 
@@ -22,6 +23,8 @@ MODEL_READY_ROWS = 420
 RETENTION_DAYS = 365
 _WORKER_LOCK = threading.Lock()
 _ACTIVE_WORKER: threading.Thread | None = None
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+DAILY_BAR_COMPLETION_TIME = time(15, 10)
 
 
 def _now() -> str:
@@ -39,12 +42,20 @@ def _load(value: str | None, default):
         return default
 
 
-def _target_market_date() -> str:
-    today = date.today().isoformat()
+def _target_market_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(SHANGHAI)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI)
+    else:
+        current = current.astimezone(SHANGHAI)
+    completed_through = current.date()
+    if current.timetz().replace(tzinfo=None) < DAILY_BAR_COMPLETION_TIME:
+        completed_through -= timedelta(days=1)
+    completed_date = completed_through.isoformat()
     with closing(connect()) as conn:
         row = conn.execute(
             "SELECT MAX(trade_date) FROM trading_calendar WHERE is_open=1 AND trade_date<=?",
-            (today,),
+            (completed_date,),
         ).fetchone()
         if row and row[0]:
             return str(row[0])
@@ -54,7 +65,7 @@ def _target_market_date() -> str:
         if row and row[0]:
             return str(row[0])
         row = conn.execute("SELECT MAX(trade_date) FROM market_daily_bars").fetchone()
-    return str(row[0]) if row and row[0] else today
+    return str(row[0]) if row and row[0] else completed_date
 
 
 def _market_coverage(symbols: list[str], target_asof: str) -> dict[str, dict]:
@@ -153,7 +164,8 @@ def sector_cache_status() -> dict:
     initialize()
     with closing(connect()) as conn:
         row = conn.execute(
-            "SELECT * FROM sector_cache_jobs ORDER BY id DESC LIMIT 1"
+            """SELECT * FROM sector_cache_jobs
+               WHERE status!='CANCELLED' ORDER BY id DESC LIMIT 1"""
         ).fetchone()
     return _job_payload(row)
 
@@ -460,7 +472,17 @@ def trigger_active_sector_cache(force: bool = False) -> dict:
 
 def recover_sector_cache_jobs() -> int:
     initialize()
+    target_asof = _target_market_date()
+    stamp = _now()
     with closing(connect()) as conn:
+        conn.execute(
+            """UPDATE sector_cache_jobs SET status='CANCELLED',current_symbol=NULL,
+                 last_error=?,completed_at=?,updated_at=?
+               WHERE status IN ('QUEUED','RUNNING_MARKET','RUNNING_FUNDAMENTALS')
+                 AND target_asof>?""",
+            (f"目标日期尚未完成交易，最近已完成交易日为 {target_asof}",
+             stamp, stamp, target_asof),
+        )
         rows = conn.execute(
             """SELECT id FROM sector_cache_jobs
                WHERE status IN ('RUNNING_MARKET','RUNNING_FUNDAMENTALS')"""
@@ -469,9 +491,9 @@ def recover_sector_cache_jobs() -> int:
             conn.execute(
                 """UPDATE sector_cache_jobs SET status='QUEUED',current_symbol=NULL,
                    updated_at=? WHERE status IN ('RUNNING_MARKET','RUNNING_FUNDAMENTALS')""",
-                (_now(),),
+                (stamp,),
             )
-            conn.commit()
+        conn.commit()
     if rows:
         _ensure_worker()
     return len(rows)

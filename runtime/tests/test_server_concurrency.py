@@ -234,6 +234,11 @@ class ServerConcurrencyTests(unittest.TestCase):
         self.assertIn("组合相关情景区间", app_js)
         self.assertIn("未通过门禁的期限仍提供明确标注的历史基准情景", app_js)
         self.assertIn("包含未证明预测优势的历史基准情景", app_js)
+        self.assertIn("scenarioForecastDays", result_renderer)
+        self.assertIn("validated_horizon_trading_days", result_renderer)
+        self.assertIn("共同严格校准 ${validatedForecastDays} 日", result_renderer)
+        self.assertIn('portfolio-endpoint-grid extended', app_js)
+        self.assertIn('.portfolio-endpoint-grid.extended', styles)
         self.assertIn(".quant-equity-chart .forecast-band-wide", styles)
         self.assertIn(".quant-equity-chart .forecast-median", styles)
 

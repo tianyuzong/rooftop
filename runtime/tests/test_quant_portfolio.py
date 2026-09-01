@@ -607,6 +607,67 @@ class QuantPortfolioTests(unittest.TestCase):
         self.assertEqual(result[0]["action_label"], "偏多观察")
         self.assertEqual(result[0]["sell_conclusion"]["status"], "NOT_TRIGGERED")
 
+    def test_legacy_published_result_gets_forecast_fields_on_read(self):
+        result = {
+            "request": {
+                "capital": 100000, "horizon_months": 24,
+                "target_return_pct": 30, "risk_profile": "aggressive",
+            },
+            "data": {"end": "2026-09-01"},
+            "recommendation": {
+                "profile": "aggressive", "data_asof": "2026-09-01",
+                "positions": [],
+                "research_recommendations": [{
+                    "symbol": "603127", "name": "昭衍新药",
+                    "reference_price": 50, "amount": 20000,
+                }],
+                "research_watchlist": [{
+                    "symbol": "603127", "name": "昭衍新药",
+                    "reference_price": 50,
+                }],
+            },
+        }
+        forecast = {
+            "validation_status": "WALK_FORWARD_CALIBRATED_PARTIAL",
+            "requested_horizon_trading_days": 504,
+            "validated_horizon_trading_days": 21,
+            "summary": {
+                "action": "BUY_WATCH", "action_label": "偏多观察",
+                "sell_review": {"status": "NOT_TRIGGERED"},
+            },
+            "forecast_curve": [
+                {"trading_day": 0, "p10": 50, "p25": 50, "p50": 50,
+                 "p75": 50, "p90": 50},
+                {"trading_day": 21, "p10": 45, "p25": 48, "p50": 55,
+                 "p75": 58, "p90": 62},
+            ],
+        }
+
+        def attach(items, data_asof, horizon_months, profile):
+            self.assertEqual((data_asof, horizon_months, profile),
+                             ("2026-09-01", 24, "aggressive"))
+            items[0]["timeframe_forecast"] = forecast
+            items[0]["action_signal"] = "BUY_WATCH"
+            items[0]["action_label"] = "偏多观察"
+            items[0]["sell_conclusion"] = {"status": "NOT_TRIGGERED"}
+            return items
+
+        with patch.object(
+            quant_portfolio, "_attach_timeframe_forecasts", side_effect=attach,
+        ), patch.object(
+            quant_portfolio, "_historical_copula",
+            return_value={"status": "UNAVAILABLE", "rows": [], "common_days": 0},
+        ):
+            enriched = quant_portfolio._ensure_recommendation_forecasts(result)
+
+        recommendation = enriched["recommendation"]
+        self.assertEqual(recommendation["forecast_allocations"][0]["symbol"], "603127")
+        self.assertEqual(recommendation["research_watchlist"][0]["action_label"],
+                         "偏多观察")
+        self.assertEqual(recommendation["portfolio_forecast"]["status"], "AVAILABLE")
+        self.assertEqual(recommendation["portfolio_forecast"]["endpoint"]["p50"],
+                         102000)
+
     def test_equivalent_constraint_registration_reuses_mandate(self):
         with tempfile.TemporaryDirectory() as folder:
             db_path = Path(folder) / "test.db"

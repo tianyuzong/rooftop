@@ -383,6 +383,17 @@ def _published_decision(conn, mandate_row) -> dict:
             "order_execution": False,
         }
     result = _load(version_row["result_json"], {})
+    try:
+        _ensure_recommendation_forecasts(result)
+    except Exception as exc:
+        recommendation = result.get("recommendation") or {}
+        request = result.get("request") or mandate.get("input") or {}
+        recommendation["portfolio_forecast"] = {
+            "status": "UNAVAILABLE",
+            "capital": round(float(request.get("capital") or 0.0), 2),
+            "curve": [],
+            "reason": f"组合预测补算失败：{exc}",
+        }
     active_data_asof = str(
         result.get("recommendation", {}).get("data_asof")
         or result.get("data", {}).get("end") or ""
@@ -1565,6 +1576,69 @@ def _attach_timeframe_forecasts(items: list[dict], data_asof: str,
     return items
 
 
+def _ensure_recommendation_forecasts(result: dict) -> dict:
+    """Add forecast fields to current and legacy published recommendation payloads."""
+    recommendation = result.get("recommendation") or {}
+    request = result.get("request") or {}
+    existing = recommendation.get("forecast_allocations") or []
+    if (
+        recommendation.get("portfolio_forecast")
+        and existing
+        and all(item.get("timeframe_forecast") for item in existing)
+    ):
+        return result
+
+    allocations = (
+        recommendation.get("positions")
+        or recommendation.get("research_recommendations")
+        or recommendation.get("research_allocations")
+        or []
+    )
+    data_asof = str(
+        recommendation.get("data_asof")
+        or result.get("data", {}).get("end")
+        or ""
+    )
+    if not allocations or not data_asof:
+        recommendation["forecast_allocations"] = allocations
+        recommendation["portfolio_forecast"] = _rule_snapshot_portfolio_forecast(
+            allocations, float(request.get("capital") or 0.0),
+            float(request.get("target_return_pct") or 0.0),
+        )
+        return result
+
+    profile = str(recommendation.get("profile") or request.get("risk_profile") or "balanced")
+    horizon_months = int(request.get("horizon_months") or 12)
+    _attach_timeframe_forecasts(
+        allocations, data_asof, horizon_months, profile,
+    )
+    recommendation["forecast_allocations"] = allocations
+
+    enriched_by_symbol = {
+        str(item.get("symbol") or ""): item for item in allocations
+    }
+    for key in (
+        "positions", "research_recommendations", "research_watchlist",
+        "research_allocations",
+    ):
+        for item in recommendation.get(key) or []:
+            enriched = enriched_by_symbol.get(str(item.get("symbol") or ""))
+            if not enriched or enriched is item:
+                continue
+            for field in (
+                "timeframe_forecast", "action_signal", "action_label",
+                "sell_conclusion",
+            ):
+                if field in enriched:
+                    item[field] = enriched[field]
+
+    recommendation["portfolio_forecast"] = _rule_snapshot_portfolio_forecast(
+        allocations, float(request.get("capital") or 0.0),
+        float(request.get("target_return_pct") or 0.0),
+    )
+    return result
+
+
 def _cached_rule_snapshot_result(mandate: dict,
                                  fallback_reason: str | None = None) -> dict:
     """Rank cached candidates immediately when no validated model/template is available."""
@@ -2703,6 +2777,9 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
         current["candidate_ranking"] = _display_candidate_ranking(
             current["candidate_ranking"], current["positions"]
         )
+        research_watchlist = research_recommendations or _research_watchlist(
+            current["candidate_ranking"], request["max_positions"]
+        )
         research_names = "、".join(item["name"] for item in research_recommendations)
         decision_label = selection["label"]
         if research_names:
@@ -2732,9 +2809,7 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
             "rules": current["rules"],
             "candidate_ranking": current["candidate_ranking"],
             "research_recommendations": research_recommendations,
-            "research_watchlist": research_recommendations or _research_watchlist(
-                current["candidate_ranking"], request["max_positions"]
-            ),
+            "research_watchlist": research_watchlist,
             "research_cash_weight": round(max(
                 0.0, 1.0 - sum(item["weight"] for item in research_recommendations)
             ), 6),
@@ -2779,6 +2854,7 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
             ],
             "research_only": True, "order_execution": False,
         }
+        _ensure_recommendation_forecasts(result)
         with closing(connect()) as conn:
             version = _version_quant_result(conn, mandate_id, run_id, result)
             result["version"] = version
