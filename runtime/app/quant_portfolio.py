@@ -48,6 +48,9 @@ SECTOR_ALIASES = {
     "科技": ("半导体", "软件", "通信", "电脑硬件"),
 }
 
+RULE_SNAPSHOT_STANDARD_HISTORY_DAYS = 420
+RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS = 252
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -320,7 +323,8 @@ def _published_decision(conn, mandate_row) -> dict:
             )
             try:
                 latest_cached_asof = _cached_candidate_asof(
-                    mandate["input"], minimum_history_days=420
+                    mandate["input"],
+                    minimum_history_days=RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS,
                 )
             except Exception:
                 latest_cached_asof = evaluated_data_asof
@@ -400,7 +404,8 @@ def _published_decision(conn, mandate_row) -> dict:
     )
     try:
         latest_cached_asof = _cached_candidate_asof(
-            mandate["input"], minimum_history_days=420
+            mandate["input"],
+            minimum_history_days=RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS,
         )
     except Exception:
         latest_cached_asof = active_data_asof
@@ -1643,9 +1648,12 @@ def _cached_rule_snapshot_result(mandate: dict,
                                  fallback_reason: str | None = None) -> dict:
     """Rank cached candidates immediately when no validated model/template is available."""
     request = dict(mandate["input"])
-    data_asof = _cached_candidate_asof(request, minimum_history_days=420)
+    data_asof = _cached_candidate_asof(
+        request, minimum_history_days=RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS
+    )
     prepared = _cached_candidate_pool(
-        request, data_asof, minimum_history_days=420
+        request, data_asof,
+        minimum_history_days=RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS,
     )
     candidates = prepared["candidates"]
     profile = request["risk_profile"] if request["risk_profile"] != "auto" else "balanced"
@@ -1688,6 +1696,7 @@ def _cached_rule_snapshot_result(mandate: dict,
     current = _current_portfolio(
         portfolio_mandate, strategy, candidates, data_asof=data_asof,
         use_prediction_model=False, allocate_positions=False,
+        minimum_history_days=RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS,
     )
     if current["data_asof"] != data_asof:
         raise RuntimeError("候选股票的共同缓存日期不一致")
@@ -1713,6 +1722,21 @@ def _cached_rule_snapshot_result(mandate: dict,
         float(request["target_return_pct"]),
     )
     passed = sum(bool(item.get("rule_pass")) for item in ranking)
+    common_history_days = int(current["history"]["rows"])
+    compressed_history = common_history_days < RULE_SNAPSHOT_STANDARD_HISTORY_DAYS
+    history_window = {
+        "mode": "COMPRESSED" if compressed_history else "STANDARD",
+        "common_trading_days": common_history_days,
+        "standard_days": RULE_SNAPSHOT_STANDARD_HISTORY_DAYS,
+        "minimum_usable_days": RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS,
+        "confidence": "LOWER" if compressed_history else "STANDARD",
+        "description": (
+            f"共同历史只有 {common_history_days} 个交易日，已自动压缩即时计算窗口；"
+            "结果可用于当前排序，但可信度低于 420 日标准窗口。"
+            if compressed_history else
+            f"共同历史达到 {common_history_days} 个交易日，满足 420 日标准窗口。"
+        ),
+    }
     recommendation = {
         "profile": profile,
         "profile_label": PROFILE_LABELS[profile],
@@ -1739,7 +1763,11 @@ def _cached_rule_snapshot_result(mandate: dict,
         "holdout_metrics": {"status": "UNAVAILABLE_NOT_VALIDATED"},
         "parameters": parameters,
         "credibility": {
-            "validation_status": "RULE_ONLY_NOT_BACKTESTED",
+            "validation_status": (
+                "RULE_ONLY_COMPRESSED_HISTORY_NOT_BACKTESTED"
+                if compressed_history else "RULE_ONLY_NOT_BACKTESTED"
+            ),
+            "history_window": history_window,
             "model": {}, "strategy": {}, "walk_forward_history": [],
             "data_ranges": {
                 "start": min(str(item["history"]["data_start"]) for item in candidates),
@@ -1751,6 +1779,7 @@ def _cached_rule_snapshot_result(mandate: dict,
                 "included": True, "reason": "仅用于即时规则排序"
             } for item in candidates],
             "warning": (
+                history_window["description"] +
                 "当前因子排序和资金分配规则尚未完成组合级样本外回测；"
                 "逐股未来期限另行执行滚动样本外校准，未通过的期限不展示。"
             ),
@@ -1775,6 +1804,7 @@ def _cached_rule_snapshot_result(mandate: dict,
             "cached_data_only": True, "market_refresh": False,
             "backtest_executed": False, "formal_signal_allowed": False,
             "custom_parameters_validated": False,
+            "compressed_history": compressed_history,
         },
         "run_id": None, "created_at": stamp, "activated_at": None,
     }
@@ -1787,7 +1817,7 @@ def _cached_rule_snapshot_result(mandate: dict,
         "strategies": [],
         "data": {
             "end": data_asof,
-            "rows": min(int(item["history"]["rows"]) for item in candidates),
+            "rows": common_history_days,
             "source": "cached_bars_rule_ranking_no_model",
         },
         "inference": {
@@ -1796,6 +1826,7 @@ def _cached_rule_snapshot_result(mandate: dict,
             "preference_version": request.get("preference_version"),
             "data_asof": data_asof, "model_version": None,
             "fallback_reason": fallback_reason,
+            "history_window": history_window,
             "refresh_data": False, "backtest_executed": False,
         },
         "version": version,
@@ -1806,6 +1837,7 @@ def _cached_rule_snapshot_result(mandate: dict,
         },
         "limitations": [
             "只使用已缓存的最近完整交易日数据，不联网刷新。",
+            *([history_window["description"]] if compressed_history else []),
             "没有活动预测模型时不冒充正式上涨概率；逐股未来区间只展示通过滚动样本外门禁的期限。",
             "研究分配金额和股数按用户本金与整手规则计算，不代表真实持仓或已执行交易。",
             "资金分配规则的组合级样本外回测仍待盘后验证，不阻塞当前多因子排序。",
@@ -2409,10 +2441,14 @@ def _current_portfolio(mandate: dict, strategy: dict, candidates: list[dict],
                        data_asof: str | None = None,
                        model_version: str | None = None,
                        use_prediction_model: bool = True,
-                       allocate_positions: bool = True) -> dict:
+                       allocate_positions: bool = True,
+                       minimum_history_days: int = 420) -> dict:
     from .continuous_learning import latest_symbol_scores
 
-    data = _load_aligned_universe(mandate, data_asof=data_asof)
+    data = _load_aligned_universe(
+        mandate, data_asof=data_asof,
+        minimum_history_days=minimum_history_days,
+    )
     model = (
         latest_symbol_scores(
             data["symbols"], data_asof=data_asof, model_version=model_version
@@ -2495,6 +2531,10 @@ def _current_portfolio(mandate: dict, strategy: dict, candidates: list[dict],
         "positions": selected, "cash_amount": round(mandate["capital"] - invested, 2),
         "cash_weight": round(max(0.0, 1.0 - invested / mandate["capital"]), 6),
         "candidate_ranking": ranked,
+        "history": {
+            "start": data["data_start"], "end": data["data_end"],
+            "rows": data["rows"], "raw_rows": data["raw_rows"],
+        },
         "rules": {
             "stop_loss_pct": mandate["stop_loss_pct"],
             "take_profit_pct": mandate["take_profit_pct"],

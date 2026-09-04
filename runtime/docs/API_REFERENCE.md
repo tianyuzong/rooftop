@@ -14,7 +14,7 @@
 远程请求示例：
 
 ```powershell
-$headers = @{ "X-Argus-Token" = (Get-Content -Raw C:\ArgusSecrets\remote.token).Trim() }
+$headers = @{ "X-Argus-Token" = (Get-Content -Raw C:\RooftopSecrets\remote.token).Trim() }
 Invoke-RestMethod http://argus.example.com/api/health -Headers $headers
 ```
 

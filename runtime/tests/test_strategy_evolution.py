@@ -59,6 +59,23 @@ def normalized_mandate(iterations=2):
 
 
 class StrategyEvolutionTests(unittest.TestCase):
+    def test_immediate_snapshot_can_use_compressed_common_history(self):
+        source = synthetic_data(rows=395)
+        mandate = normalized_mandate()
+
+        with patch(
+            "app.stock_compare._load_bars",
+            side_effect=lambda symbol: source["bars"][symbol],
+        ), patch(
+            "app.fundamentals.load_fundamental_timelines", return_value={}
+        ):
+            compressed = strategy_evolution._load_aligned_universe(
+                mandate, minimum_history_days=252
+            )
+            self.assertEqual(compressed["rows"], 395)
+            with self.assertRaisesRegex(RuntimeError, "至少需要 420 天"):
+                strategy_evolution._load_aligned_universe(mandate)
+
     def test_half_year_folds_step_by_126_days_and_end_at_latest_bar(self):
         data = synthetic_data(rows=756)
         validation, holdout = strategy_evolution._folds(data, normalized_mandate())

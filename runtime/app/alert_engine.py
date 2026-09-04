@@ -28,7 +28,7 @@ def run_alert_cycle(send: bool = False) -> dict:
         body = (f"（模型输出）{row['name']} {row['symbol']}：{discipline['reason']}\n"
                 f"当前价 {row['current_price']}，成本 {lines['cost']}，止损 {lines['stop_loss']}，"
                 f"止盈 {lines['take_profit']}。\n仅为人工复核提醒，不构成投资建议，系统不会下单。")
-        if queue_alert(dedupe, f"[Argus] {row['symbol']} {discipline['action']} 复核提醒", body):
+        if queue_alert(dedupe, f"[Rooftop] {row['symbol']} {discipline['action']} 复核提醒", body):
             queued.append({"symbol": row["symbol"], "action": discipline["action"]})
     delivery = send_pending() if send else {"status": "NOT_REQUESTED", "sent": 0}
     return {"queued": queued, "queued_count": len(queued), "delivery": delivery}

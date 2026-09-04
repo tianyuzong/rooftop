@@ -17,6 +17,14 @@ class ContentDisclosureContractTests(unittest.TestCase):
         self.assertNotIn('argus-display-mode', self.index + self.app)
         self.assertNotIn('applyDisplayMode', self.app)
 
+    def test_stop_loss_hint_stays_inline_so_the_input_row_aligns(self):
+        styles = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+        self.assertIn('class="decision-field-label"', self.app)
+        self.assertIn(".decision-field-label{display:flex", styles)
+        self.assertNotIn(
+            'value="${Number(d.stop_loss_pct)}"><small>', self.app
+        )
+
     def test_professional_material_is_available_in_disclosures(self):
         self.assertIn(".professional-only { display: none !important; }", self.contrast)
         self.assertIn(".professional-disclosure .professional-only", self.contrast)
@@ -41,6 +49,28 @@ class ContentDisclosureContractTests(unittest.TestCase):
         self.assertIn("Final readability layer", self.contrast)
         self.assertIn("font-size: 13px !important", self.contrast)
         self.assertIn("outline: 2px solid var(--cyan)", self.contrast)
+
+    def test_rooftop_brand_replaces_visible_argus_branding(self):
+        self.assertIn("<title>Rooftop · 投资研究台</title>", self.index)
+        self.assertIn("<strong>ROOFTOP</strong>", self.index)
+        self.assertNotIn("<title>Argus", self.index)
+        self.assertNotIn("<strong>ARGUS</strong>", self.index)
+        self.assertIn("请输入 Rooftop 远程访问令牌", self.app)
+        self.assertIn("Rooftop-持仓导入模板.csv", self.app)
+        self.assertIn("X-Argus-Token", self.app)
+
+    def test_saved_risk_settings_cannot_break_recommendation_views(self):
+        self.assertIn("const maxDrawdown=Math.max(1,Math.min(80", self.app)
+        self.assertIn("input[key]=bounded", self.app)
+        self.assertIn("已将${adjusted.join('和')}收紧到最大回撤", self.app)
+        self.assertIn('max="${Number(d.max_drawdown_pct)}"', self.app)
+        self.assertIn("旧设置冲突时会自动收紧", self.app)
+
+    def test_forecast_charts_prioritize_calibrated_horizon(self):
+        self.assertIn("hasReferenceTail?source.filter", self.app)
+        self.assertIn("精度优先：主图只显示通过滚动检验", self.app)
+        self.assertIn("长期历史基准仅在专业表格显示", self.app)
+        self.assertIn("不作为精确预测", self.app)
 
 
 if __name__ == "__main__":

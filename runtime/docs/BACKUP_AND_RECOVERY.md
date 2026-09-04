@@ -1,6 +1,6 @@
 # 备份与恢复
 
-`market_intelligence.db` 是 Argus 的系统记录，包含行情索引、研究授权书、回测/版本记录、自定义模型、信号、通知订阅和审计日志。使用 SQLite 在线备份 API，不能在服务运行时直接复制数据库主文件。
+`market_intelligence.db` 是 Rooftop 的系统记录，包含行情索引、研究授权书、回测/版本记录、自定义模型、信号、通知订阅和审计日志。使用 SQLite 在线备份 API，不能在服务运行时直接复制数据库主文件。
 
 ## 创建备份
 
@@ -14,7 +14,7 @@
 
 ## 恢复演练
 
-1. 停止 Argus 服务和计划任务。
+1. 停止 Rooftop 服务和计划任务。
 2. 核对备份 JSON 中的 SHA-256，并对备份运行 `PRAGMA quick_check`。
 3. 保留当前数据库副本，再把已验证备份放入目标数据湖的 `db/market_intelligence.db`。
 4. 启动本地回环服务，检查 `/api/health`、`/api/models`、`/api/signals` 和最近活动组合。

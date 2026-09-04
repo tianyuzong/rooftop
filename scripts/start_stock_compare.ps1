@@ -104,7 +104,7 @@ $pythonPath = if ($venvRoot) {
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 } else { "" }
 if (-not $pythonPath -or -not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Argus 股票对比专用虚拟环境尚未准备，请先运行 scripts\setup_stock_compare_env.ps1"
+    throw "Rooftop 股票对比专用虚拟环境尚未准备，请先运行 scripts\setup_stock_compare_env.ps1"
 }
 $parsedBindAddress = $null
 if (-not [Net.IPAddress]::TryParse($BindAddress, [ref]$parsedBindAddress)) {
@@ -224,7 +224,7 @@ try {
         $mutexAcquired = $true
     }
     if (-not $mutexAcquired) {
-        throw "等待 Argus 股票对比共享服务启动锁超时"
+        throw "等待 Rooftop 股票对比共享服务启动锁超时"
     }
 
     $selectedPort = $Port

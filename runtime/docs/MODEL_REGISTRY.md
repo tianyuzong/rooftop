@@ -1,6 +1,6 @@
 # 研究模型注册表
 
-Argus 的 MVP 使用版本化、声明式 JSON 保存自定义财务与估值模型。模型定义进入 `research_model_definitions`，激活范围进入 `research_model_assignments`。运行时不执行用户 Python、JavaScript、Shell、Excel 宏或券商代码。
+Rooftop 的 MVP 使用版本化、声明式 JSON 保存自定义财务与估值模型。模型定义进入 `research_model_definitions`，激活范围进入 `research_model_assignments`。运行时不执行用户 Python、JavaScript、Shell、Excel 宏或券商代码。
 
 ## 生命周期
 

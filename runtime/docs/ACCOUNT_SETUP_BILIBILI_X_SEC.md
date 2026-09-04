@@ -37,7 +37,7 @@ $env:ARGUS_X_BEARER_TOKEN='在你本机粘贴，不要发给任何人'
 SEC 只要求自动程序提供可识别的 User-Agent。请在本机设置一个项目名和可联系邮箱：
 
 ```powershell
-$env:ARGUS_SEC_IDENTITY='ArgusResearch your-email@example.com'
+$env:ARGUS_SEC_IDENTITY='RooftopResearch your-email@example.com'
 .\run.ps1
 ```
 

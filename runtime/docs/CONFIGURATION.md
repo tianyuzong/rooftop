@@ -1,6 +1,6 @@
 # 配置参考
 
-Argus 通过环境变量和启动脚本参数配置。项目不会自动读取 `.env`；仓库根目录的 `.env.example` 只用于说明字段。凭证、令牌、邮箱和本机路径应在启动进程的 PowerShell 会话或受控服务账户中设置。
+Rooftop 通过环境变量和启动脚本参数配置。项目不会自动读取 `.env`；仓库根目录的 `.env.example` 只用于说明字段。凭证、令牌、邮箱和本机路径应在启动进程的 PowerShell 会话或受控服务账户中设置。
 
 布尔变量统一使用字符串 `1` 表示启用。未说明的空值表示不配置。
 
@@ -47,7 +47,7 @@ Argus 通过环境变量和启动脚本参数配置。项目不会自动读取 `
 | `ARGUS_PUBLIC_HOST` | `127.0.0.1` | 主机名/IP | 健康信息和页面 URL 使用 |
 | `ARGUS_REMOTE_TOKEN_FILE` | 空 | 本机文件路径 | 配置后所有 `/api/*` 都要求 `X-Argus-Token` |
 | `ARGUS_ALLOWED_HOSTS` | 空 | 逗号分隔主机 | 为空时不额外限制 Host |
-| `ARGUS_ALLOWED_ORIGINS` | 同源 | 逗号分隔 origin | 仅修改请求校验；例如 `https://argus.example.com` |
+| `ARGUS_ALLOWED_ORIGINS` | 同源 | 逗号分隔 origin | 仅修改请求校验；例如 `https://rooftop.example.com` |
 | `ARGUS_API_RATE_LIMIT_PER_MINUTE` | `180` | 30-10000 | 内存限流，服务重启后窗口清空 |
 | `ARGUS_MAX_CONCURRENT_COMPARISONS` | `8` | 1-32 | 并发股票对比槽位 |
 
@@ -87,7 +87,7 @@ A 股开盘判断使用 `Asia/Shanghai`：09:30-11:30、13:00-15:00，并结合�
 | `ARGUS_DAILY_SOCIAL_SYMBOLS` | `3` | >=0 | 每日允许采集社交资料的标的数量 |
 | `ARGUS_BILIBILI_BROWSER` | 未配置 | `chrome/edge/firefox` | 可选本机浏览器会话；不保存密码 |
 | `ARGUS_X_BEARER_TOKEN` | 未配置 | X 官方 API token | 只存在于环境变量，不写数据库 |
-| `ARGUS_SEC_IDENTITY` | 未配置 | `产品名 email` | SEC EDGAR 合规 User-Agent，例如 `ArgusResearch a@b.com` |
+| `ARGUS_SEC_IDENTITY` | 未配置 | `产品名 email` | SEC EDGAR 合规 User-Agent，例如 `RooftopResearch a@b.com` |
 
 Bilibili、X 和 SEC 都是可选源。未配置时状态必须显示为未配置，而不是伪造数据。
 
@@ -149,7 +149,7 @@ SMTP 主机、用户和密码必须同时存在才显示 configured。即使配�
 
 ```powershell
 $env:ARGUS_STOCK_COMPARE_VENV = "C:\venvs\argus-stock-comparison"
-$env:ARGUS_DATA_LAKE = "C:\ArgusData\data_lake"
+$env:ARGUS_DATA_LAKE = "C:\RooftopData\data_lake"
 ./scripts/start_stock_compare.ps1 -View signals
 ```
 

@@ -80,5 +80,5 @@ $profiles = @(Get-NetConnectionProfile | Select-Object InterfaceAlias, NetworkCa
     public_scheme = $PublicScheme
     tls_termination = if ($PublicScheme -eq 'https') { 'external_reverse_proxy_required' } else { 'not_configured_not_recommended' }
     network_profiles = $profiles
-    next_check = "使用 -TokenFile 启动 Argus 后，从浏览器访问 ${PublicScheme}://${PublicHost}:$Port/；首次 API 请求会要求输入令牌"
+    next_check = "使用 -TokenFile 启动 Rooftop 后，从浏览器访问 ${PublicScheme}://${PublicHost}:$Port/；首次 API 请求会要求输入令牌"
 } | ConvertTo-Json -Depth 4

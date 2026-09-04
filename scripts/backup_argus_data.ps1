@@ -21,7 +21,7 @@ $pythonPath = @(
     (Join-Path $venvRoot "Scripts\python.exe")
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
 if (-not $pythonPath) {
-    throw "Argus 专用 Python 环境不存在"
+    throw "Rooftop 专用 Python 环境不存在"
 }
 $dataLakeRoot = if ($DataLakePath) {
     [IO.Path]::GetFullPath($DataLakePath)
@@ -32,7 +32,7 @@ $dataLakeRoot = if ($DataLakePath) {
 }
 $database = Join-Path $dataLakeRoot "db\market_intelligence.db"
 if (-not (Test-Path -LiteralPath $database -PathType Leaf)) {
-    throw "Argus 数据库不存在：$database"
+    throw "Rooftop 数据库不存在：$database"
 }
 $backupRoot = if ($OutputDirectory) {
     [IO.Path]::GetFullPath($OutputDirectory)

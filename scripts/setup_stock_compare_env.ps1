@@ -19,7 +19,7 @@ if (-not $VenvPath) {
     }
 }
 if (-not $VenvPath) {
-    throw "未配置 Argus 股票对比虚拟环境路径"
+    throw "未配置 Rooftop 股票对比虚拟环境路径"
 }
 if (-not [IO.Path]::IsPathRooted($VenvPath)) {
     $VenvPath = [IO.Path]::GetFullPath((Join-Path $pluginRoot $VenvPath))

@@ -10,6 +10,10 @@ from app.db import connect, initialize
 
 
 class QuantPortfolioTests(unittest.TestCase):
+    def test_rule_snapshot_history_policy_keeps_formal_threshold_intact(self):
+        self.assertEqual(quant_portfolio.RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS, 252)
+        self.assertEqual(quant_portfolio.RULE_SNAPSHOT_STANDARD_HISTORY_DAYS, 420)
+
     def test_methodology_exposes_half_year_recursive_cross_validation(self):
         rolling = quant_portfolio.recommendation_methodology_payload()["rolling_backtest"]
         self.assertEqual(rolling["period_trading_days"], 126)

@@ -1,15 +1,15 @@
 {
   "name": "argus-stock-comparison",
-  "version": "1.0.0+codex.20260901172113",
+  "version": "1.0.0+codex.20260904022252",
   "description": "A-share research signals, constrained portfolios, versioned financial models, email notifications, backtests, and gated daily evolution.",
   "author": {
     "name": "TianyuZong"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Argus \u7814\u7a76\u4fe1\u53f7",
+    "displayName": "Rooftop \u7814\u7a76\u4fe1\u53f7",
     "shortDescription": "A-share research signals, models, backtests, and notifications.",
-    "longDescription": "Build constrained A-share research portfolios, run chronological holdout backtests, activate versioned financial and valuation models, publish review-only buy, sell, and rebalance signals, and deliver opt-in email notifications. Argus never connects to a broker or executes orders.",
+    "longDescription": "Build constrained A-share research portfolios, run chronological holdout backtests, activate versioned financial and valuation models, publish review-only buy, sell, and rebalance signals, and deliver opt-in email notifications. Rooftop never connects to a broker or executes orders.",
     "developerName": "TianyuZong",
     "category": "Productivity",
     "capabilities": [

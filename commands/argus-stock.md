@@ -1,5 +1,5 @@
 ---
-description: 运行 Argus A 股研究信号、邮件提醒、模型版本、股票对比或约束选股。
+description: 运行 Rooftop A 股研究信号、邮件提醒、模型版本、股票对比或约束选股。
 argument-hint: "[股票列表，或本金/期限/风险/板块/持仓数等条件]"
 skills: stock-comparison-visualizer
 ---

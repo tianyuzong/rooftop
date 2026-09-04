@@ -29,7 +29,7 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     $pythonPath = Join-Path $venvRoot "Scripts\python.exe"
 }
 if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Argus dedicated Python environment does not exist"
+    throw "Rooftop dedicated Python environment does not exist"
 }
 
 $env:ARGUS_MARKET_PROVIDER = "tdx"

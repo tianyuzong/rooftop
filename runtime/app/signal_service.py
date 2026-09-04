@@ -186,7 +186,7 @@ def _queue_for_subscribers(signal: dict, signal_id: int,
         confidence = float(signal.get("confidence") or 0.0)
         if signal["action"] not in event_kinds or confidence < float(subscription["minimum_confidence"]):
             continue
-        subject = f"[Argus] {signal['action']} {signal['name']} {signal['symbol']} 人工复核提醒"
+        subject = f"[Rooftop] {signal['action']} {signal['name']} {signal['symbol']} 人工复核提醒"
         body = (
             f"信号：{signal['action']}\n股票：{signal['name']} {signal['symbol']}\n"
             f"数据截至：{signal['data_asof']}\n参考价：{signal.get('reference_price') or '—'}\n"
@@ -345,7 +345,7 @@ def create_subscription(payload: dict, conn_factory: Callable = connect) -> dict
                (name,mandate_id,channel,target,enabled,event_kinds_json,
                 minimum_confidence,created_at,updated_at)
                VALUES(?,?,?,?,1,?,?,?,?)""",
-            (str(payload.get("name") or "Argus 邮件提醒").strip()[:100],
+            (str(payload.get("name") or "Rooftop 邮件提醒").strip()[:100],
              int(mandate_id) if mandate_id is not None else None, channel, target,
              _dump(sorted(set(kinds))), minimum, stamp, stamp),
         )
@@ -397,8 +397,8 @@ def queue_test_email(subscription_id: int | None = None,
         target = row["target"]
     target = target or os.environ.get("ARGUS_ALERT_TO")
     queued = queue_alert(
-        f"test:{uuid.uuid4().hex}", "[Argus] 邮件通道测试",
-        "Argus 邮件提醒通道测试成功。系统只发送研究提醒，不连接券商或自动下单。",
+        f"test:{uuid.uuid4().hex}", "[Rooftop] 邮件通道测试",
+        "Rooftop 邮件提醒通道测试成功。系统只发送研究提醒，不连接券商或自动下单。",
         target=target, subscription_id=subscription_id,
         metadata={"kind": "CHANNEL_TEST"}, conn_factory=conn_factory,
     )

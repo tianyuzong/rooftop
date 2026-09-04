@@ -252,7 +252,8 @@ def _risk_budget(profile: str, mandate: dict) -> float:
     return min(user_limit * scale, ceiling)
 
 
-def _load_aligned_universe(mandate: dict, data_asof: str | None = None) -> dict:
+def _load_aligned_universe(mandate: dict, data_asof: str | None = None,
+                           minimum_history_days: int = 420) -> dict:
     from .stock_compare import _load_bars
     from .fundamentals import load_fundamental_timelines
 
@@ -265,8 +266,10 @@ def _load_aligned_universe(mandate: dict, data_asof: str | None = None) -> dict:
     dates = sorted(set.intersection(*(set(rows) for rows in raw.values())))
     if data_asof:
         dates = [item for item in dates if item <= str(data_asof)]
-    if len(dates) < 420:
-        raise RuntimeError(f"共同交易日只有 {len(dates)} 天，至少需要 420 天才能进行滚动样本外验证")
+    if len(dates) < minimum_history_days:
+        raise RuntimeError(
+            f"共同交易日只有 {len(dates)} 天，至少需要 {minimum_history_days} 天"
+        )
     raw_start, raw_rows = dates[0], len(dates)
     requested_days = int(mandate.get("backtest_window_years", 3)) * 252
     # A one-year evaluation still needs earlier bars for indicators and three

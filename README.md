@@ -1,8 +1,8 @@
-# Argus
+# Rooftop
 
-Argus 是一个本地运行、面向 A 股的量化研究与盘后信号系统。它可以比较 2-8 只股票，也可以根据本金、期限、目标收益、最大回撤、止损、止盈、板块和最多持仓数，生成受约束的研究组合、历史回测、未来情景区间和待人工复核的买入/卖出/调仓信号。
+Rooftop 是一个本地运行、面向 A 股的量化研究与盘后信号系统。它可以比较 2-8 只股票，也可以根据本金、期限、目标收益、最大回撤、止损、止盈、板块和最多持仓数，生成受约束的研究组合、历史回测、未来情景区间和待人工复核的买入/卖出/调仓信号。
 
-Argus **不连接券商、不提交订单、不承诺收益**。所有金额、股数和价格区间都是研究输出；只有用户导入真实持仓后，系统才会计算真实账户口径的成本、盈亏和可卖数量。
+Rooftop **不连接券商、不提交订单、不承诺收益**。所有金额、股数和价格区间都是研究输出；只有用户导入真实持仓后，系统才会计算真实账户口径的成本、盈亏和可卖数量。
 
 ## 1. 当前能力
 
@@ -87,7 +87,7 @@ runtime/docs/                   架构、接口、模型、数据和部署细节
 
 ## 4. 模型到底用了什么
 
-Argus 不是“让一个大模型直接猜股价”。不同任务使用不同模型，并且每个模型都必须保留数据时间和验证状态。
+Rooftop 不是“让一个大模型直接猜股价”。不同任务使用不同模型，并且每个模型都必须保留数据时间和验证状态。
 
 | 任务 | 当前模型 | 默认启用 | 作用 |
 |---|---|---:|---|
@@ -127,8 +127,8 @@ Argus 不是“让一个大模型直接猜股价”。不同任务使用不同�
 ## 6. 安装
 
 ```powershell
-git clone https://github.com/tianyuzong/Argus.git
-Set-Location Argus
+git clone https://github.com/tianyuzong/rooftop.git
+Set-Location rooftop
 
 $env:ARGUS_STOCK_COMPARE_VENV = "C:\venvs\argus-stock-comparison"
 ./scripts/setup_stock_compare_env.ps1
@@ -173,7 +173,7 @@ $env:ARGUS_PIP_INDEX_URL = "https://pypi.org/simple"
 ### 指定数据目录
 
 ```powershell
-$env:ARGUS_DATA_LAKE = "C:\ArgusData\data_lake"
+$env:ARGUS_DATA_LAKE = "C:\RooftopData\data_lake"
 ./scripts/start_stock_compare.ps1 -View signals
 ```
 
@@ -224,7 +224,7 @@ Invoke-RestMethod `
 
 ## 9. 配置
 
-Argus 只从进程环境读取本机路径和凭证，不读取仓库内的密钥 JSON，也不会自动加载 `.env`。`.env.example` 只是字段清单。
+Rooftop 只从进程环境读取本机路径和凭证，不读取仓库内的密钥 JSON，也不会自动加载 `.env`。`.env.example` 只是字段清单。
 
 最常用配置：
 
