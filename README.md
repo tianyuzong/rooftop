@@ -143,6 +143,20 @@ $env:ARGUS_PIP_INDEX_URL = "https://pypi.org/simple"
 ./scripts/setup_stock_compare_env.ps1
 ```
 
+### Zcode 接入
+
+插件同时提供 `.zcode-plugin/plugin.json`、Zcode Skill 和斜杠命令。首次使用或源码更新后运行：
+
+```powershell
+./scripts/install_zcode_integration.ps1 -Force
+./scripts/zcode_cli.ps1 skills list --json
+./scripts/zcode_cli.ps1 commands list --json
+```
+
+Zcode 中的主入口是 `/rooftop-stock`；原来的 `/argus-stock` 作为兼容别名保留。两者都支持无参数查看信号、传入 2-8 只股票进行对比，或传入本金、风险和板块条件自动选股。
+
+`zcode_cli.ps1` 会自动查找正在运行的 Zcode，包括安装在非系统盘的版本；Node.js 不在 `PATH` 时也会尝试使用 Codex 自带运行时。其他机器可通过 `ZCODE_CLI_PATH` 和 `ZCODE_NODE_PATH` 显式指定路径。
+
 ## 7. 启动
 
 ### 信号中心
