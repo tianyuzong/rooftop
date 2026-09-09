@@ -15,10 +15,12 @@
 
 ```powershell
 $headers = @{ "X-Argus-Token" = (Get-Content -Raw C:\RooftopSecrets\remote.token).Trim() }
-Invoke-RestMethod http://argus.example.com/api/health -Headers $headers
+Invoke-RestMethod https://argus.example.com/api/health -Headers $headers
 ```
 
 ## 2. GET 接口
+
+服务维护接口 `POST /api/service/shutdown` 仅接受回环客户端，正文必须为 `{"confirmed":true}`，并遵守现有令牌鉴权。它用于启动器受控升级，不接受远程关闭请求。
 
 ### 服务、首页和数据
 
@@ -108,13 +110,13 @@ Invoke-RestMethod http://argus.example.com/api/health -Headers $headers
 |---|---|---|
 | `/api/signals/{id}/acknowledge` | 空对象 | 状态改为 `ACKNOWLEDGED` |
 | `/api/signals/{id}/dismiss` | 空对象 | 状态改为 `DISMISSED` |
-| `/api/notification-subscriptions` | `name,target,event_kinds,minimum_confidence,mandate_id?` | 创建显式 EMAIL 订阅，`201` |
+| `/api/notification-subscriptions` | `id?,name,target,digest_kinds?,watch_stocks?,send_time?,event_kinds,minimum_confidence,mandate_id?` | 创建或更新显式 EMAIL 订阅；更新会取消旧内容的未发送消息 |
 | `/api/notification-subscriptions/{id}/enable` | 空对象 | 启用订阅 |
 | `/api/notification-subscriptions/{id}/disable` | 空对象 | 停用订阅 |
 | `/api/notifications/test` | `subscription_id?` | 向 outbox 加入测试邮件 |
 | `/api/notifications/send` | `limit` 默认 50，最大 200 | 处理待发送 outbox；仍受 SMTP 和 send 开关控制 |
 
-`event_kinds` 支持 `BUY`、`SELL`、`REBALANCE`，也可包含 `WATCH`。`minimum_confidence` 是 0-1；`mandate_id` 是内部数值 ID，不是 `mandate_key`。
+`event_kinds` 支持 `BUY`、`SELL`、`REBALANCE`、`HOLD` 和 `WATCH`，仅订阅日报时可为空。`minimum_confidence` 是 0-1；`mandate_id` 是内部数值 ID，不是 `mandate_key`。日报选项、日期与投递状态见下方“投资日报与邮件投递”。
 
 ### 真实持仓导入
 
@@ -208,3 +210,27 @@ Harness 不接受任意 Shell 或任意工具名。可用 workflow 和工具由 
 | `DRY_RUN` | 邮件已进入 outbox，但未外发 |
 
 任何组合或预测响应都应包含 `research_only=true` 和 `order_execution=false`。
+
+## 自然语言研究与服务状态
+
+- `GET /api/services`：后台线程存活、等待时点、自动重启次数、Codex 登录和学习评测摘要。
+- `GET /api/research-agent`：Agent 状态与最近 30 条研究。
+- `POST /api/research-agent/runs`：提交 `{ "question": "投资需求", "parent_key": null }`；返回 202 和持久 run_key。
+- `GET /api/research-agent/runs/{run_key}`：阶段、事件、冻结计划、本地计算证据、报告和用量。
+- `POST /api/research-agent/runs/{run_key}/cancel`：取消研究，保留已完成步骤。
+- `POST /api/research-agent/evolve`：通过 Harness 提交行情更新、预测评分、模型/策略和受限源码评测闭环。
+
+上述接口沿用现有认证、来源校验和限流。页面入口 `/?view=agent`。后台队列一次调用一个 Codex，最多等待 8 项；服务中断后记录 INTERRUPTED，可显式重试。
+
+## 投资日报与邮件投递
+
+- `GET /api/email-settings`：返回已脱敏的 SMTP 配置和发送开关，不返回授权码。
+- `POST /api/email-settings`：保存 `host,port,user,security=ssl|starttls,password,enabled,default_target`。Windows DPAPI 加密授权码。
+- `POST /api/email-settings/verify`：验证 SMTP 连接与登录；不等同于收件成功。
+- `POST /api/notification-subscriptions`：可带 `id` 更新，支持 `digest_kinds=[MARKET,COMPANIES]`、`watch_stocks`（名称或代码）、`send_time=08:30`、`event_kinds=[]`。关注名单不写入持仓；修改订阅会取消旧内容的待发邮件。
+- `POST /api/digests/preview`：`digest_kinds,watch_stocks,report_date` 生成所选日期日报预览，缺少数据时明确标注。
+- `POST /api/digests/send`：`subscription_id,report_date` 发送已保存订阅的日报，同一订阅同一天不重复发送。
+- `POST /api/notifications/{id}/retry`：重试失败邮件。
+- `POST /api/notifications/{id}/received`：用户确认实际收到，记录与 SMTP 接受状态分离。
+
+通知线程每 30 秒检查一次发送时间，每天按北京时间总结前一天；本机服务需要运行。错过时间但当天重新启动会补发前一天。报告只使用所选日期行情和新闻，以及截至该日已公告财报，不把未来或演示行情补入空缺。

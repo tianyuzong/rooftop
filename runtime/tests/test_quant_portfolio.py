@@ -10,6 +10,82 @@ from app.db import connect, initialize
 
 
 class QuantPortfolioTests(unittest.TestCase):
+    def test_versioning_republishes_changed_valuation_policy_and_audits_failed_gates(self):
+        from copy import deepcopy
+        from app.fundamentals import VALUATION_TIME_POLICY
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "versions.db"
+            initialize(path)
+            with closing(connect(path)) as conn:
+                mandate = conn.execute(
+                    "INSERT INTO quant_mandates(mandate_key,name,status,input_json,created_at,updated_at) "
+                    "VALUES('policy-test','policy-test','ACTIVE','{}','now','now')"
+                ).lastrowid
+                result = {
+                    "request": {"max_drawdown_pct": 15}, "data": {"end": "2026-09-04"},
+                    "candidates": [{"symbol": "600519"}],
+                    "recommendation": {"expectation": {"p50": .2}, "model_version": "model-v1",
+                                       "holdout_metrics": {"risk_pass": True, "max_drawdown": .1},
+                                       "non_regression_pass": True},
+                }
+                def publish(key, value):
+                    run_id = conn.execute(
+                        "INSERT INTO quant_portfolio_runs(run_key,mandate_id,trigger_kind,status,started_at) "
+                        "VALUES(?,?,'test','SUCCESS','now')", (key, mandate),
+                    ).lastrowid
+                    return quant_portfolio._version_quant_result(conn, mandate, run_id, deepcopy(value))
+                old = publish("legacy", result)
+                result["fundamental_time_policy"] = VALUATION_TIME_POLICY
+                corrected = publish("corrected", result)
+                self.assertEqual(corrected["status"], "ACTIVE")
+                self.assertNotEqual(old["version_key"], corrected["version_key"])
+                self.assertTrue(corrected["gate"]["new_snapshot"])
+                self.assertEqual(publish("identical", result)["status"], "UNCHANGED")
+                failed = deepcopy(result)
+                failed["recommendation"]["holdout_metrics"]["risk_pass"] = False
+                rejected = publish("risk-failed", failed)
+                self.assertEqual(rejected["status"], "REJECTED")
+                self.assertFalse(rejected["gate"]["risk_pass"])
+                failed = deepcopy(result)
+                failed["recommendation"]["expectation"]["p50"] = -.1
+                self.assertEqual(publish("score-regression", failed)["status"], "REJECTED")
+                active = conn.execute("SELECT version_key FROM quant_portfolio_versions WHERE status='ACTIVE'").fetchone()[0]
+                self.assertEqual(active, corrected["version_key"])
+
+    def test_garbled_sectors_are_rejected_before_mandate_registration(self):
+        with self.assertRaisesRegex(ValueError, "乱码"):
+            quant_portfolio.normalize_quant_request(self._request(sectors=["??", "???"]))
+
+    def test_daily_refresh_reuses_complete_same_day_cache(self):
+        with patch.object(
+            quant_portfolio, "_cached_daily_symbols",
+            return_value={"600519", "000858"},
+        ), patch(
+            "app.continuous_learning._refresh_market_data_isolated"
+        ) as refresh:
+            result = quant_portfolio._refresh_daily(
+                ["600519", "000858"], cache_complete_asof="2026-09-04"
+            )
+        self.assertEqual(result["status"], "CACHED")
+        self.assertEqual(result["cached_symbols"], 2)
+        refresh.assert_not_called()
+
+    def test_daily_refresh_chunks_only_missing_symbols(self):
+        symbols = [f"{index:06d}" for index in range(45)]
+        with patch.object(
+            quant_portfolio, "_cached_daily_symbols",
+            side_effect=[{symbols[0]}, set(symbols)],
+        ), patch(
+            "app.continuous_learning._refresh_market_data_isolated",
+            return_value={"status": "REFRESHED"},
+        ) as refresh:
+            result = quant_portfolio._refresh_daily(
+                symbols, cache_complete_asof="2026-09-04"
+            )
+        self.assertEqual([len(call.args[0]) for call in refresh.call_args_list], [20, 20, 4])
+        self.assertEqual(result["refreshed_symbols"], 44)
+        self.assertEqual(result["batches"], 3)
+
     def test_rule_snapshot_history_policy_keeps_formal_threshold_intact(self):
         self.assertEqual(quant_portfolio.RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS, 252)
         self.assertEqual(quant_portfolio.RULE_SNAPSHOT_STANDARD_HISTORY_DAYS, 420)
@@ -1122,6 +1198,55 @@ class QuantPortfolioTests(unittest.TestCase):
                 result = quant_portfolio.refresh_active_quant_portfolios()
             self.assertEqual(result["mandates"], 2)
             self.assertEqual(seen, [3, 2])
+
+    def test_cycle_retry_reuses_committed_results_but_not_changed_constraints(self):
+        from app.fundamentals import VALUATION_TIME_POLICY
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "retry.db"
+            initialize(path)
+            request = quant_portfolio.normalize_quant_request(self._request())
+            with closing(connect(path)) as conn:
+                cycle = conn.execute(
+                    "INSERT INTO harness_learning_cycles(cycle_key,cycle_date,phase,status,trigger_kind,"
+                    "universe_json,started_at) VALUES('cycle','2026-09-04','POST_CLOSE','PARTIAL','test','[]','now')"
+                ).lastrowid
+                for index, key in enumerate(("finished", "changed", "other-cycle", "failed", "old-policy", "old-model")):
+                    current_request = {**request, "name": key, "capital": 100000 + index}
+                    mandate = conn.execute(
+                        "INSERT INTO quant_mandates(mandate_key,name,status,input_json,created_at,updated_at) "
+                        "VALUES(?,?,'ACTIVE',?,'now','now')", (key, key, json.dumps(current_request)),
+                    ).lastrowid
+                    saved_request = dict(current_request)
+                    if key == "changed":
+                        saved_request["capital"] = 200000
+                    saved = {"request": saved_request, "run_key": key,
+                             "version": {"version_key": key}, "data": {"end": "2026-09-04"},
+                             "fundamental_time_policy": "legacy" if key == "old-policy" else VALUATION_TIME_POLICY}
+                    conn.execute(
+                        "INSERT INTO quant_portfolio_runs(run_key,mandate_id,learning_cycle_id,trigger_kind,"
+                        "status,result_json,prediction_model_version,started_at) VALUES(?,?,?,'daily_post_close',?,?,?,'now')",
+                        (key, mandate, None if key == "other-cycle" else cycle,
+                         "FAILED" if key == "failed" else "SUCCESS", json.dumps(saved),
+                         "previous-model" if key == "old-model" else None),
+                    )
+                conn.commit()
+            seen = []
+            with patch.multiple(
+                quant_portfolio, connect=lambda: connect(path), initialize=lambda: initialize(path),
+                run_quant_portfolio=lambda request, **kwargs: (
+                    seen.append(request["name"]) or {"run_key": request["name"], "version": {}}
+                ),
+            ):
+                result = quant_portfolio.refresh_active_quant_portfolios(
+                    learning_cycle_id=cycle, only_mandate_keys=["other-cycle", "failed"],
+                )
+            self.assertEqual(result["reused"], 1)
+            self.assertEqual(result["updated"], 6)
+            self.assertEqual(set(seen), {"changed", "other-cycle", "failed", "old-policy", "old-model"})
+            self.assertFalse(result["errors"])
+            finished = next(item for item in result["results"] if item["mandate_key"] == "finished")
+            self.assertEqual(finished["version"]["version_key"], "finished")
+            self.assertTrue(finished["reused_checkpoint"])
 
     def test_daily_refresh_normalizes_legacy_mandates_and_has_no_twenty_item_cap(self):
         with tempfile.TemporaryDirectory() as folder:

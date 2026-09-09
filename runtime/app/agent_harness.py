@@ -33,7 +33,7 @@ WORKFLOWS = {
     },
     "strategy_evolution": {
         "label": "策略自进化",
-        "description": "冻结投资约束，迭代三档组合策略，并用滚动验证与独立留出集评估。",
+        "description": "冻结投资约束，持续迭代三档组合策略；全部门禁通过后自动激活，否则在新交易日继续优化。",
     },
     "continuous_learning": {
         "label": "持续自进化",
@@ -41,7 +41,7 @@ WORKFLOWS = {
     },
     "strategy_activation": {
         "label": "策略激活",
-        "description": "复核三档策略的样本外风险门禁，等待人工批准后激活版本。",
+        "description": "复核三档策略的样本外风险门禁，并自动激活全部门禁通过的版本。",
     },
     "candidate_activation": {
         "label": "候选晋级",
@@ -122,8 +122,8 @@ TOOL_SPECS = {
     },
     "activate_strategy_experiment": {
         "description": "把三档策略均通过样本外风险门禁的实验激活为策略版本。",
-        "risk_level": "CONSEQUENTIAL_WRITE",
-        "approval_required": True,
+        "risk_level": "INTERNAL_WRITE",
+        "approval_required": False,
         "max_attempts": 1,
     },
     "evaluate_candidate": {
@@ -340,7 +340,7 @@ def _build_plan(workflow: str, inputs: dict) -> list[dict]:
             {"step_key": "review", "tool": "review_strategy_experiment",
              "summary": "复核实验和风险门禁", "arguments": {"experiment_key": inputs["experiment_key"]}},
             {"step_key": "activate", "tool": "activate_strategy_experiment",
-             "summary": "等待人工批准后激活策略版本",
+             "summary": "通过全部风险门禁后自动激活策略版本",
              "arguments": {"experiment_key": inputs["experiment_key"]}},
         ]
     if workflow == "candidate_activation":
@@ -497,8 +497,8 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
             "order_execution": False,
         }
     if tool_name == "evolve_portfolio_strategies":
-        from .strategy_evolution import run_strategy_evolution
-        return run_strategy_evolution(arguments["mandate"], normalized=True)
+        from .strategy_evolution import run_strategy_evolution_with_auto_retry
+        return run_strategy_evolution_with_auto_retry(arguments["mandate"], normalized=True)
     if tool_name == "continuous_learning_cycle":
         from .continuous_learning import run_continuous_learning_cycle
         return run_continuous_learning_cycle(arguments)
@@ -507,8 +507,7 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
         return review_strategy_experiment(str(arguments["experiment_key"]))
     if tool_name == "activate_strategy_experiment":
         from .strategy_evolution import activate_strategy_experiment
-        return activate_strategy_experiment(str(arguments["experiment_key"]),
-                                              str(arguments["_approved_by"]))
+        return activate_strategy_experiment(str(arguments["experiment_key"]))
     if tool_name == "list_activation_candidates":
         with closing(connect()) as conn:
             rows = conn.execute(
@@ -694,7 +693,12 @@ def _synthesize(workflow: str, outputs: dict[str, dict]) -> dict:
             "experiment_key": experiment.get("experiment_key"),
             "strategies": strategies,
             "activation_eligible": experiment.get("activation_eligible", False),
-            "activation_requires_human_approval": True,
+            "activation_requires_human_approval": False,
+            "automatic_activation": True,
+            "automatic_version": experiment.get("automatic_version"),
+            "retry_status": experiment.get("retry_status"),
+            "retry_reason": experiment.get("retry_reason"),
+            "retry_job": experiment.get("retry_job"),
             "artifacts": {"experiment": experiment},
             "order_execution": False,
         }

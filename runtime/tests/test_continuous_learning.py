@@ -2,7 +2,7 @@ import json
 import math
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import ExitStack, closing
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +12,155 @@ from app.db import connect, initialize
 
 
 class ContinuousLearningTests(unittest.TestCase):
+    def test_cached_close_requires_every_trading_minute_for_every_stock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "close.db"
+            initialize(path)
+            self._seed_bars(path, rows=30)
+            minutes = [*range(571, 691), *range(781, 901)]
+            with closing(connect(path)) as conn:
+                source_id = conn.execute("SELECT id FROM data_sources WHERE code='tdx_public'").fetchone()[0]
+                for symbol in ("600519", "000858"):
+                    conn.executemany(
+                        "INSERT INTO minute_bars(asset_symbol,bar_time,interval_minutes,open,high,low,close,source_id,captured_at,raw_path) "
+                        "VALUES(?,?,1,1,1,1,1,?,'fixture','fixture')",
+                        [(symbol, f"2025-01-31T{minute // 60:02d}:{minute % 60:02d}:00+08:00", source_id)
+                         for minute in minutes],
+                    )
+                conn.commit()
+            with self._patch_db(path):
+                self.assertTrue(continuous_learning.market_close_coverage(["600519", "000858"], "2025-01-31")["complete"])
+                with closing(connect(path)) as conn:
+                    conn.execute("DELETE FROM minute_bars WHERE asset_symbol='000858' AND bar_time='2025-01-31T10:15:00+08:00'")
+                    conn.commit()
+                coverage = continuous_learning.market_close_coverage(["600519", "000858", "300750"], "2025-01-31")
+                self.assertFalse(coverage["complete"])
+                self.assertEqual(coverage["missing_minute_symbols"], ["000858", "300750"])
+                self.assertEqual(coverage["minute_counts"], {"600519": 240, "000858": 239, "300750": 0})
+
+    def test_freshness_requires_every_requested_stock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "coverage.db"
+            initialize(path)
+            self._seed_bars(path, rows=30)
+            with closing(connect(path)) as conn:
+                last = conn.execute("SELECT MAX(trade_date) FROM market_daily_bars").fetchone()[0]
+                conn.execute("DELETE FROM market_daily_bars WHERE asset_symbol='000858' AND trade_date=?", (last,))
+                conn.commit()
+            with self._patch_db(path):
+                coverage = continuous_learning.market_data_coverage(["600519", "000858", "999999"], last)
+                self.assertFalse(coverage["complete"])
+                self.assertEqual(coverage["missing_symbols"], ["999999"])
+                self.assertEqual(coverage["stale_symbols"], ["000858"])
+                self.assertIsNone(coverage["data_asof"])
+                self.assertLess(continuous_learning._latest_data_date(["600519", "000858"]), last)
+
+    def _online_fixture(self, path):
+        initialize(path)
+        with self._patch_db(path):
+            active = continuous_learning._ensure_active_model()
+        weights = {name: 0.0 for name in continuous_learning.FEATURE_NAMES}
+        weights["bias"] = 0.2
+        with closing(connect(path)) as conn:
+            conn.execute(
+                "UPDATE prediction_model_versions SET training_start='2026-01-01',training_end='2026-08-28',"
+                "coefficients_json=?,metrics_json=? WHERE version_key=?",
+                (json.dumps(weights), json.dumps({"training_sample_count": 500}), active["version_key"]),
+            )
+            conn.commit()
+        samples = []
+        for index in range(5):
+            target = date(2026, 8, 31) + timedelta(days=index)
+            for symbol in ("600519", "000858", "300750"):
+                features = {name: 0.0 for name in continuous_learning.FEATURE_NAMES}
+                features["bias"] = 1.0
+                samples.append({"symbol": symbol, "signal_date": (target - timedelta(days=1)).isoformat(),
+                                "target_date": target.isoformat(), "features": features, "actual_return": 0.01})
+        return active, weights, samples
+
+    def test_daily_learning_advances_checkpoint_without_relearning_old_labels(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "online.db"
+            active, weights, samples = self._online_fixture(path)
+            with self._patch_db(path), patch.object(
+                continuous_learning, "build_walk_forward_samples", return_value=samples
+            ), patch.object(continuous_learning, "_latest_data_date", return_value="2026-09-04"):
+                result = continuous_learning.run_six_month_walk_forward(["600519", "000858", "300750"])
+                again = continuous_learning.run_six_month_walk_forward(["600519", "000858", "300750"])
+            self.assertEqual(result["status"], "ACTIVE")
+            self.assertEqual(result["training_end"], "2026-09-04")
+            self.assertEqual(result["baseline_version"], active["version_key"])
+            self.assertEqual(result["gate"]["evaluation_trading_days"], 5)
+            self.assertEqual(result["gate"]["evaluation_scope"], "incremental_forward")
+            self.assertEqual(again["status"], "UNCHANGED")
+            self.assertEqual(again["gate"]["evaluation_scope"], "incremental_forward")
+            self.assertTrue(again["gate"]["evaluation_reused"])
+            self.assertFalse(again["gate"]["new_data_available"])
+            with closing(connect(path)) as conn:
+                row = conn.execute("SELECT * FROM prediction_model_versions WHERE status='ACTIVE'").fetchone()
+                self.assertNotEqual(json.loads(row["coefficients_json"]), weights)
+                dates = conn.execute("SELECT MIN(target_date) FROM prediction_backtest_points").fetchone()[0]
+                self.assertGreater(dates, "2026-08-28")
+
+    def test_daily_learning_rejects_regression_against_current_model(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "regression.db"
+            active, weights, samples = self._online_fixture(path)
+            def bad_update(coefficients, batch):
+                coefficients["bias"] = -3.0
+            with self._patch_db(path), patch.object(
+                continuous_learning, "build_walk_forward_samples", return_value=samples
+            ), patch.object(continuous_learning, "_latest_data_date", return_value="2026-09-04"), patch.object(
+                continuous_learning, "_update_online_weights", side_effect=bad_update
+            ):
+                result = continuous_learning.run_six_month_walk_forward(["600519", "000858", "300750"])
+            self.assertEqual(result["status"], "REJECTED")
+            self.assertFalse(result["gate"]["non_regression"])
+            with closing(connect(path)) as conn:
+                row = conn.execute("SELECT version_key,training_end FROM prediction_model_versions WHERE status='ACTIVE'").fetchone()
+                self.assertEqual(row["version_key"], active["version_key"])
+                self.assertEqual(row["training_end"], "2026-08-28")
+
+    def test_failed_portfolios_remain_retryable_and_retry_only_failures(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            path = Path(folder) / "cycle.db"
+            initialize(path)
+            stack.enter_context(self._patch_db(path))
+            for name, value in {
+                "settle_predictions": {"scored": 0}, "run_six_month_walk_forward": {"status": "UNCHANGED"},
+                "_latest_data_date": "2026-09-04", "market_data_coverage": {"complete": True},
+                "create_daily_predictions": {"count": 0}, "next_trading_day": date(2026, 9, 7),
+            }.items():
+                stack.enter_context(patch.object(continuous_learning, name, return_value=value))
+            stack.enter_context(patch("app.deep_learning.settle_deep_predictions", return_value={"scored": 0}))
+            refresh = stack.enter_context(patch("app.quant_portfolio.refresh_active_quant_portfolios", side_effect=[
+                {"mandates": 2, "updated": 1, "results": [{"mandate_key": "ok"}],
+                 "errors": [{"mandate_key": "failed", "error": "timeout"}]},
+                {"mandates": 1, "updated": 1, "results": [{"mandate_key": "failed"}], "errors": []},
+            ]))
+            inputs = {"phase": "POST_CLOSE", "cycle_date": "2026-09-04", "symbols": ["600519"],
+                      "refresh_calendar": False, "refresh_data": False, "refresh_fundamentals": False,
+                      "collect_sentiment": False, "train_deep_model": False, "evolve_intraday": False,
+                      "evolve_source_code": False}
+            first = continuous_learning.run_continuous_learning_cycle(inputs)
+            self.assertEqual(first["status"], "PARTIAL")
+            with closing(connect(path)) as conn:
+                row = conn.execute("SELECT * FROM harness_learning_cycles").fetchone()
+                self.assertTrue(continuous_learning._cycle_needs_retry(row))
+            with self.assertRaisesRegex(ValueError, "universe is frozen"):
+                continuous_learning.run_continuous_learning_cycle({**inputs, "symbols": ["000858"]})
+            retry_inputs = {**inputs, "refresh_data": True}
+            retry_inputs.pop("symbols")
+            with patch.object(continuous_learning, "learning_universe", return_value=["000858"]), patch.object(
+                continuous_learning, "market_close_coverage", return_value={"complete": True}
+            ) as coverage, patch.object(continuous_learning, "_refresh_market_data_isolated") as network:
+                second = continuous_learning.run_continuous_learning_cycle(retry_inputs)
+                coverage.assert_called_once_with(["600519"], "2026-09-04")
+                network.assert_not_called()
+            self.assertEqual(refresh.call_args.kwargs["only_mandate_keys"], ["failed"])
+            self.assertEqual(second["status"], "SUCCESS")
+            self.assertEqual(second["metrics"]["quant_portfolios"]["updated"], 2)
+
     def _patch_db(self, path):
         return patch.multiple(
             continuous_learning,

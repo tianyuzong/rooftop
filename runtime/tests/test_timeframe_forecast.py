@@ -90,6 +90,24 @@ class TimeframeForecastTests(unittest.TestCase):
             conn.commit()
         return (start + timedelta(days=1199)).isoformat()
 
+    def test_forecast_does_not_bridge_decade_gap_or_change_raw_records(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db_path = Path(folder) / "forecast.db"
+            initialize(db_path)
+            asof = self._seed_stochastic_tdx_bars(db_path)
+            with closing(connect(db_path)) as conn:
+                source = conn.execute("SELECT id FROM data_sources WHERE code='tdx_public'").fetchone()[0]
+                for i in range(300):
+                    stamp = (date(2001, 1, 1) + timedelta(days=i)).isoformat()
+                    conn.execute("INSERT INTO market_daily_bars(asset_symbol,trade_date,adjust_mode,open,high,low,close,volume,amount,source_id,captured_at,raw_path) VALUES('600519',?,'qfq',1,1,1,1,100,100,?,'old','fixture')", (stamp, source))
+                conn.commit()
+                result = build_timeframe_forecast(conn, "600519", asof, 6, "balanced")
+                self.assertEqual(result["data_quality"]["excluded_rows"], 300)
+                self.assertEqual(result["data_quality"]["retained_rows"], 1200)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM market_daily_bars WHERE asset_symbol='600519'").fetchone()[0],1500)
+                current = result["history_curve"][-1]["price"]
+                self.assertTrue(all(p["p90"] < current * 3 for p in result["forecast_curve"]))
+
     def test_stochastic_history_extends_rejected_horizons_as_labeled_baseline(self):
         with tempfile.TemporaryDirectory() as folder:
             db_path = Path(folder) / "forecast.db"

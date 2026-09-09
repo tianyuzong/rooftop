@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,11 +10,22 @@ from app import harness, harness_autonomy
 
 class HarnessTests(unittest.TestCase):
     def _patch_db(self, path):
-        return patch.multiple(
+        with closing(connect(path)) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO assets(symbol,name,market,asset_type,currency) "
+                "VALUES('600519','贵州茅台','CN','STOCK','CNY')"
+            )
+            conn.commit()
+        stack = ExitStack()
+        stack.enter_context(patch.multiple(
             "app.harness",
             connect=lambda: connect(path),
             initialize=lambda: initialize(path),
-        )
+        ))
+        stack.enter_context(patch("app.stock_compare.connect", lambda: connect(path)))
+        stack.enter_context(patch("app.search.connect", lambda: connect(path)))
+        stack.enter_context(patch("app.stock_compare._online_name_match", return_value=None))
+        return stack
 
     def test_bad_case_is_deduplicated_and_counted(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -231,6 +231,18 @@ def _prepare_sandbox(candidate: dict, manifest: dict) -> tuple[Path, Path, dict]
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(ROOT / "scripts", sandbox / "scripts",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # The full regression suite checks published documentation and both plugin manifests.
+    # Preserve these fixtures in the isolated repository; otherwise every candidate fails
+    # due to missing files rather than its strategy behavior.
+    for relative in ("runtime/docs", ".codex-plugin", ".zcode-plugin", "commands", "skills"):
+        source = ROOT / relative
+        if source.is_dir():
+            shutil.copytree(source, sandbox / relative,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for relative in ("README.md", ".env.example", "LICENSE"):
+        source = ROOT / relative
+        if source.is_file():
+            shutil.copy2(source, sandbox / relative)
     sandbox_lake = sandbox / "data_lake"
     _copy_database(sandbox_lake / "db" / "market_intelligence.db")
     environment = os.environ.copy()

@@ -9,6 +9,10 @@ $pluginRoot = Split-Path -Parent $PSScriptRoot
 $runtimeRoot = Join-Path $pluginRoot "runtime"
 $configuredDataLakePath = if ($DataLakePath) {
     $DataLakePath
+} elseif ($env:ARGUS_DATA_LAKE) {
+    $env:ARGUS_DATA_LAKE
+} elseif ([Environment]::GetEnvironmentVariable("ARGUS_DATA_LAKE", "User")) {
+    [Environment]::GetEnvironmentVariable("ARGUS_DATA_LAKE", "User")
 } else {
     Join-Path $runtimeRoot "data_lake"
 }
@@ -50,7 +54,7 @@ foreach ($definition in $definitions) {
 
 $serviceTaskName = "Argus-Ashare-Web-Service"
 $serviceArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass " +
-    "-File `"$launcher`" -View harness -DataLakePath `"$dataLakeRoot`""
+    "-File `"$launcher`" -View harness -ReplaceService -DataLakePath `"$dataLakeRoot`""
 $serviceAction = New-ScheduledTaskAction -Execute $powershell -Argument $serviceArguments
 $serviceTriggers = @(
     (New-ScheduledTaskTrigger -AtLogOn -User $identity),

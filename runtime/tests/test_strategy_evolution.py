@@ -59,6 +59,11 @@ def normalized_mandate(iterations=2):
 
 
 class StrategyEvolutionTests(unittest.TestCase):
+    def test_legacy_retry_adoption_skips_explicit_smoke_records(self):
+        self.assertFalse(strategy_evolution._legacy_retry_allowed({"name": "harness-smoke"}))
+        self.assertFalse(strategy_evolution._legacy_retry_allowed({"name": "界面链路验证"}))
+        self.assertTrue(strategy_evolution._legacy_retry_allowed({"name": "三档组合策略实验"}))
+
     def test_immediate_snapshot_can_use_compressed_common_history(self):
         source = synthetic_data(rows=395)
         mandate = normalized_mandate()
@@ -197,14 +202,89 @@ class StrategyEvolutionTests(unittest.TestCase):
                 self.assertIn("excess_return", result["strategies"][0]["holdout"]["metrics"])
                 self.assertIn("profit_loss_ratio", result["strategies"][0]["holdout"]["metrics"])
 
-                with self.assertRaisesRegex(PermissionError, "批准人"):
-                    strategy_evolution.activate_strategy_experiment(
-                        result["experiment_key"], "")
                 if result["activation_eligible"]:
                     version = strategy_evolution.activate_strategy_experiment(
-                        result["experiment_key"], "单元测试批准人")
+                        result["experiment_key"])
                     self.assertEqual(version["status"], "ACTIVE")
                     self.assertEqual(len(version["strategies"]), 3)
+                    self.assertEqual(
+                        version["approved_by"],
+                        strategy_evolution.AUTOMATIC_STRATEGY_APPROVER,
+                    )
+
+    def test_qualified_retry_job_auto_activates_without_human_approval(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db_path = Path(folder) / "test.db"
+            lake = Path(folder) / "lake"
+            initialize(db_path)
+            passed_gate = {
+                "passed": True, "profiles": [], "target_return_is_soft": True,
+                "risk_limits_unchanged": True,
+            }
+            with patch.multiple(
+                strategy_evolution,
+                connect=lambda: connect(db_path),
+                initialize=lambda: initialize(db_path),
+                DATA_LAKE=lake,
+                _load_aligned_universe=lambda _mandate: synthetic_data(),
+            ), patch.object(
+                strategy_evolution, "_activation_gate_details", return_value=passed_gate,
+            ), patch.object(
+                strategy_evolution, "_activation_eligible", return_value=True,
+            ):
+                result = strategy_evolution.run_strategy_evolution_with_auto_retry(
+                    normalized_mandate(iterations=1), normalized=True,
+                )
+                payload = strategy_evolution.strategy_evolution_payload()
+
+            self.assertEqual(result["retry_status"], "COMPLETED")
+            self.assertEqual(result["automatic_version"]["status"], "ACTIVE")
+            self.assertFalse(result["activation_requires_human_approval"])
+            self.assertEqual(payload["retry_jobs"][0]["status"], "COMPLETED")
+            self.assertEqual(payload["retry_jobs"][0]["attempt_count"], 1)
+            self.assertTrue(payload["automatic_activation"])
+
+    def test_rejected_strategy_waits_for_new_data_then_uses_next_candidate_batch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db_path = Path(folder) / "test.db"
+            lake = Path(folder) / "lake"
+            initialize(db_path)
+            failed_gate = {
+                "passed": False, "profiles": [], "target_return_is_soft": True,
+                "risk_limits_unchanged": True,
+            }
+            mandate = normalized_mandate(iterations=2)
+            with patch.multiple(
+                strategy_evolution,
+                connect=lambda: connect(db_path),
+                initialize=lambda: initialize(db_path),
+                DATA_LAKE=lake,
+                _load_aligned_universe=lambda _mandate: synthetic_data(),
+            ), patch.object(
+                strategy_evolution, "_activation_gate_details", return_value=failed_gate,
+            ), patch.object(
+                strategy_evolution, "_activation_eligible", return_value=False,
+            ):
+                first = strategy_evolution.run_strategy_evolution_with_auto_retry(
+                    mandate, normalized=True,
+                )
+                second = strategy_evolution.run_strategy_evolution_with_auto_retry(
+                    mandate, normalized=True,
+                )
+                with closing(connect(db_path)) as conn:
+                    job = conn.execute(
+                        "SELECT * FROM strategy_evolution_retry_jobs"
+                    ).fetchone()
+                    candidate_count = conn.execute(
+                        "SELECT COUNT(*) FROM strategy_evolution_candidates"
+                    ).fetchone()[0]
+
+            self.assertEqual(first["retry_status"], "PENDING_NEW_DATA")
+            self.assertEqual(second["retry_status"], "WAITING_FOR_NEW_DATA")
+            self.assertEqual(job["status"], "PENDING")
+            self.assertEqual(job["attempt_count"], 1)
+            self.assertEqual(job["next_candidate_offset"], 2)
+            self.assertEqual(candidate_count, 6)
 
 
 if __name__ == "__main__":

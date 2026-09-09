@@ -46,3 +46,35 @@ main{overflow-x:clip;overflow-y:visible}.signal-layout{align-items:start}.notifi
 @media(max-width:1250px){.notification-band{position:static;order:-1;width:100%;padding:0 0 22px;border-left:0;border-bottom:1px solid #27424c}.notification-band .subscription-form{grid-template-columns:repeat(2,minmax(0,1fr))}.notification-band .subscription-form fieldset,.notification-band .subscription-form .primary-button{grid-column:1/-1}}
 @media(max-width:620px){.notification-band .subscription-form{grid-template-columns:1fr}.subscription-row{grid-template-columns:minmax(0,1fr) auto}.subscription-row>.status-pill{grid-column:auto}.subscription-actions{grid-column:1/-1}}
 .decision-field-label{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}.decision-field-label>small{overflow:hidden;color:#9eb0b6;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+
+/* Keep the allocation summary readable at every panel width. */
+.quant-decision-callout.rule_snapshot {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 14px 16px;
+}
+.quant-decision-callout.rule_snapshot > * {
+  min-width: 0;
+  grid-column: 1;
+}
+.quant-decision-callout.rule_snapshot > span {
+  font-size: 11px;
+  line-height: 1.6;
+}
+.quant-decision-callout.rule_snapshot > strong {
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.quant-decision-callout.rule_snapshot > small {
+  white-space: normal;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+/* Make the recommendation outcome reachable and explain unfunded candidates. */
+.decision-action-message{grid-column:1/-1;margin:0;color:#a0d8c9;font-size:12px;line-height:1.7}
+.decision-action-message:empty{display:none}.decision-output{scroll-margin-top:20px}.decision-output:focus{outline:2px solid #3aaa8e;outline-offset:4px}
+.quant-unfunded-stock{display:grid;gap:8px;padding:14px 0;border-top:1px solid #38504f}.quant-unfunded-stock strong{color:#e8f3f0;font-size:15px}.quant-unfunded-stock small{color:#819da5}.quant-unfunded-stock span,.quant-unfunded-stock p{color:#c6b98d;font-size:13px;line-height:1.7;margin:0}
+.quant-funding-note{padding:16px;background:#152523;border:1px solid #35514b;border-radius:7px}.quant-funding-note strong{color:#b7ecd8}.quant-funding-note p{color:#a9c0c0;font-size:13px;line-height:1.8;margin:10px 0 0}

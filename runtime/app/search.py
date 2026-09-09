@@ -39,7 +39,7 @@ def _local_model_snapshot(model_cache):
 
 def collect_documents(conn, include_source_documents: bool = True) -> list[dict]:
     docs = []
-    for row in conn.execute("SELECT id,title,statement,falsification_rule,status FROM hypotheses"):
+    for row in conn.execute("SELECT id,title,statement,falsification_rule,status FROM hypotheses WHERE status!='ARCHIVED'"):
         docs.append({"doc_key": f"hypothesis:{row['id']}", "page": "research", "title": row["title"],
                      "body": f"{row['statement']} 状态：{row['status']}。反证条件：{row['falsification_rule']}",
                      "source_ref": f"trad://hypotheses/{row['id']}"})

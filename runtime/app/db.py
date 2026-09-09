@@ -318,6 +318,15 @@ CREATE TABLE IF NOT EXISTS strategy_evolution_versions (
   status TEXT NOT NULL, mandate_json TEXT NOT NULL, strategies_json TEXT NOT NULL,
   approved_by TEXT, created_at TEXT NOT NULL, activated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS strategy_evolution_retry_jobs (
+  id INTEGER PRIMARY KEY, retry_key TEXT NOT NULL UNIQUE,
+  mandate_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING',
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_candidate_offset INTEGER NOT NULL DEFAULT 0,
+  last_data_asof TEXT, last_experiment_key TEXT, active_version_key TEXT,
+  last_gate_json TEXT NOT NULL DEFAULT '{}', last_error TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS trading_calendar (
   trade_date TEXT NOT NULL, market TEXT NOT NULL DEFAULT 'CN',
   is_open INTEGER NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -639,6 +648,8 @@ CREATE INDEX IF NOT EXISTS idx_strategy_candidates_run_profile ON strategy_evolu
 CREATE INDEX IF NOT EXISTS idx_strategy_simulations_run_phase ON strategy_simulations(experiment_id,phase,profile);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_one_active_version_per_mandate
   ON strategy_evolution_versions(mandate_id) WHERE status='ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_strategy_retry_jobs_status
+  ON strategy_evolution_retry_jobs(status,updated_at);
 CREATE INDEX IF NOT EXISTS idx_learning_cycles_date ON harness_learning_cycles(cycle_date DESC,phase,status);
 CREATE INDEX IF NOT EXISTS idx_sentiment_symbol_date ON sentiment_daily(symbol,trade_date DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_single_active_model
@@ -829,18 +840,7 @@ def _seed(conn: sqlite3.Connection) -> None:
         ("上海证券交易所 ETF 公告", "https://www.sse.com.cn/", "PRIMARY_OFFICIAL", .95,
          "VERIFIED", "2026-08-12", "用于核验基金代码和公告"),
     )
-    hypotheses = [
-        ("AI 商业模式挤压", "中国开源低价路线可能挤压美国闭源高价 AI 商业模式与估值。", "UNVERIFIED",
-         "跟踪区域收入、API 单价、毛利率、市场份额及 IPO 文件；若收入与份额持续扩张则削弱该假设。"),
-        ("美日汇率干预", "2026-07-29 至 08-03 可能存在美日联合操作并影响美元兑日元。", "UNVERIFIED",
-         "必须由美国财政部、纽约联储、日本财务省或央行官方披露交叉确认。"),
-        ("降息与有色长牛", "前述宏观事件可能共同导致美国降息并支持有色金属长牛。", "UNVERIFIED",
-         "对照美联储路径、实际利率、美元、库存、供需和期限结构；核心链条失效即下调置信度。"),
-    ]
-    conn.executemany(
-        "INSERT INTO hypotheses(title,statement,status,falsification_rule,created_at) VALUES(?,?,?,?,?)",
-        [(a, b, c, d, "2026-08-11") for a, b, c, d in hypotheses],
-    )
+
 
 
 def initialize(path: Optional[Path] = None) -> Path:
@@ -919,6 +919,20 @@ def initialize(path: Optional[Path] = None) -> Path:
                 """CREATE INDEX IF NOT EXISTS idx_alert_outbox_delivery
                    ON alert_outbox(status,next_attempt_at,created_at)"""
             )
+            for table, additions in (
+                ('signal_subscriptions', [('digest_kinds_json', "TEXT NOT NULL DEFAULT '[]'"),
+                                          ('watch_symbols_json', "TEXT NOT NULL DEFAULT '[]'"),
+                                          ('send_time', "TEXT NOT NULL DEFAULT '08:30'")]),
+                ('alert_outbox', [('received_at', 'TEXT')]),
+            ):
+                columns = {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+                for name, declaration in additions:
+                    if name not in columns:
+                        conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
+            # Archive the original demonstration hypotheses, never user research.
+            conn.execute("""UPDATE hypotheses SET status='ARCHIVED'
+                WHERE created_at='2026-08-11' AND status='UNVERIFIED'
+                AND title IN ('AI 商业模式挤压','美日汇率干预','降息与有色长牛')""")
             learning_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(harness_learning_cycles)")
             }

@@ -1,7 +1,7 @@
 ﻿param(
     [string]$Stocks = "",
     [string]$Profile = "balanced",
-    [ValidateSet("auto", "signals", "compare", "harness")]
+    [ValidateSet("auto", "signals", "compare", "harness", "agent")]
     [string]$View = "auto",
     [int]$Port = 0,
     [string]$BindAddress = "127.0.0.1",
@@ -12,6 +12,7 @@
     [string]$TokenFile = "",
     [string]$AllowedHosts = "",
     [string]$AllowedOrigins = "",
+    [switch]$ReplaceService,
     [ValidateRange(30, 10000)]
     [int]$ApiRateLimitPerMinute = 180
 )
@@ -105,6 +106,39 @@ $pythonPath = if ($venvRoot) {
 } else { "" }
 if (-not $pythonPath -or -not (Test-Path -LiteralPath $pythonPath)) {
     throw "Rooftop 股票对比专用虚拟环境尚未准备，请先运行 scripts\setup_stock_compare_env.ps1"
+}
+$registeredService = $null
+$serviceDescriptorPath = Join-Path $dataLakeRoot "cache\service.json"
+if (Test-Path -LiteralPath $serviceDescriptorPath -PathType Leaf) {
+    try {
+        $candidateService = Get-Content -Raw -LiteralPath $serviceDescriptorPath | ConvertFrom-Json
+        $serviceProcessId = [int]$candidateService.process_id
+        $serviceProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$serviceProcessId" -ErrorAction SilentlyContinue
+        # PowerShell 7 can decode JSON timestamps to DateTime automatically. Casting
+        # that value back to string drops subsecond precision and can make a valid
+        # service appear older than its process, preventing safe replacement.
+        $serviceStartedAt = if ($candidateService.started_at -is [DateTime]) {
+            $candidateService.started_at.ToUniversalTime()
+        } else {
+            [DateTimeOffset]::Parse([string]$candidateService.started_at).UtcDateTime
+        }
+        if ($serviceProcess -and $serviceProcess.ExecutablePath -eq $pythonPath -and
+            $serviceProcess.CommandLine -match 'serve\.py' -and
+            $serviceProcess.CreationDate.ToUniversalTime() -le $serviceStartedAt -and
+            [IO.Path]::GetFullPath([string]$candidateService.data_lake) -eq $dataLakeRoot) {
+            $registeredService = $candidateService
+            if (-not $PSBoundParameters.ContainsKey("Port")) { $Port = [int]$registeredService.port }
+            if (-not $PSBoundParameters.ContainsKey("BindAddress")) { $BindAddress = [string]$registeredService.bind_address }
+            if (-not $resolvedTokenFile -and $registeredService.token_file) {
+                $resolvedTokenFile = [string]$registeredService.token_file
+                if (-not (Test-Path -LiteralPath $resolvedTokenFile -PathType Leaf)) {
+                    throw "Registered service token file is unavailable"
+                }
+            }
+        }
+    } catch {
+        throw "Cannot validate the registered data-lake service: $($_.Exception.Message)"
+    }
 }
 $parsedBindAddress = $null
 if (-not [Net.IPAddress]::TryParse($BindAddress, [ref]$parsedBindAddress)) {
@@ -229,6 +263,30 @@ try {
 
     $selectedPort = $Port
     $reused = $false
+    if ($registeredService -and -not (Test-ComparisonServer ([int]$registeredService.port) $venvRoot $pluginVersion $runtimeRevision $dataLakeRoot $probeHost)) {
+        if (-not $ReplaceService) {
+            throw "This data lake has a different running version. Use -ReplaceService to upgrade it."
+        }
+        $serviceProcessId = [int]$registeredService.process_id
+        try {
+            $serviceHost = Format-HttpHost $probeHost
+            Invoke-RestMethod -Method Post -Uri "http://${serviceHost}:$($registeredService.port)/api/service/shutdown" `
+                -Headers (Get-ArgusAuthHeaders) -ContentType "application/json" `
+                -Body '{"confirmed":true}' -TimeoutSec 5 | Out-Null
+            Wait-Process -Id $serviceProcessId -Timeout 15 -ErrorAction SilentlyContinue
+        } catch {
+            Write-Verbose "Graceful shutdown unavailable; stopping the validated registered process"
+        }
+        if (Get-Process -Id $serviceProcessId -ErrorAction SilentlyContinue) {
+            $replacementTarget = Get-CimInstance Win32_Process -Filter "ProcessId=$serviceProcessId"
+            if ($replacementTarget.ExecutablePath -ne $serviceProcess.ExecutablePath -or
+                $replacementTarget.CreationDate -ne $serviceProcess.CreationDate) {
+                throw "Registered process identity changed during replacement"
+            }
+            Stop-Process -Id $serviceProcessId -ErrorAction Stop
+            Wait-Process -Id $serviceProcessId -Timeout 15 -ErrorAction SilentlyContinue
+        }
+    }
     if ($selectedPort -eq 0) {
     $listeningPorts = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | ForEach-Object Port)
     foreach ($candidate in 8765..8795) {

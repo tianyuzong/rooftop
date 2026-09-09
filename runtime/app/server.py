@@ -23,7 +23,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 from .analytics import calculate_risk_lines, evaluate_discipline, market_risk, policy_catalog
-from .alerts import send_pending, smtp_status
+from .alerts import send_pending, smtp_status, confirm_received, retry_message
+from .mail_settings import public_settings, save_settings, verify_connection
+from .email_digest import build_digest, queue_digest, queue_due_digests
+from .process_lock import ProcessLock
 from .db import DATA_LAKE, ROOT, connect, initialize
 from .data_sources.desktop import probe_desktop_sources
 from .data_sources.market import DEFAULT_SYMBOLS, market_provider_mode, normalize_symbol, refresh_market_data
@@ -33,6 +36,10 @@ from .research import run_backtest, run_factor, strategy_lab_payload
 from .harness import (active_config, approve_candidate, evaluate_candidate, generate_candidate,
                       harness_payload, normalize_input, record_bad_case, rollback_version)
 from .harness_autonomy import run_autonomous_cycle
+from . import research_agent
+from .service_monitor import ServiceMonitor
+
+_service_monitor = None
 from .agent_harness import (cancel_run as cancel_harness_run,
                             create_run as create_harness_run,
                             get_run as get_harness_run,
@@ -399,7 +406,7 @@ def dashboard_payload():
                    p.cost_price,p.current_price,p.highest_since_entry,
                    p.as_of,p.source_type,p.source_name,p.verification_status,
                    p.valuation_status,p.price_observed_at,p.price_source,p.tracking_started_at
-            FROM positions p JOIN assets a ON a.id=p.asset_id ORDER BY p.id
+            FROM positions p JOIN assets a ON a.id=p.asset_id WHERE p.verification_status='USER_CONFIRMED' ORDER BY p.id
             """
         ):
             item = dict(row)
@@ -424,7 +431,7 @@ def dashboard_payload():
                 item["lines"] = None
                 item["discipline"] = None
             positions.append(item)
-        hypotheses = _rows(conn.execute("SELECT * FROM hypotheses ORDER BY id").fetchall())
+        hypotheses = _rows(conn.execute("SELECT * FROM hypotheses WHERE status!='ARCHIVED' ORDER BY id").fetchall())
         evidence = _rows(
             conn.execute(
                 """SELECT e.*,s.name AS source_name,s.url,s.reliability,s.verification_status
@@ -943,6 +950,10 @@ class ContinuousLearningRefresher(threading.Thread):
         super().__init__(name="argus-continuous-learning", daemon=True)
         self.poll_seconds = max(30, int(os.environ.get("ARGUS_CONTINUOUS_LEARNING_POLL_SECONDS", "60")))
         self.startup_delay = max(5, int(os.environ.get("ARGUS_CONTINUOUS_LEARNING_STARTUP_DELAY_SECONDS", "30")))
+        self.strategy_retry_poll_seconds = max(
+            300, int(os.environ.get("ARGUS_STRATEGY_RETRY_POLL_SECONDS", "1800"))
+        )
+        self.last_strategy_retry_check = 0.0
         self.stop_event = threading.Event()
 
     def run(self):
@@ -963,9 +974,42 @@ class ContinuousLearningRefresher(threading.Thread):
                         requested_by="continuous_learning_scheduler",
                     )
                     print(f"[continuous-learning] scheduled {run['run']['run_key']} {request['phase']}")
+                elif (not active and
+                      time.monotonic() - self.last_strategy_retry_check >=
+                      self.strategy_retry_poll_seconds):
+                    self.last_strategy_retry_check = time.monotonic()
+                    from .strategy_evolution import retry_pending_strategy_evolutions
+                    retries = retry_pending_strategy_evolutions(max_jobs=1)
+                    if retries["adopted"] or retries["results"] or retries["errors"]:
+                        print(
+                            "[strategy-evolution] "
+                            f"adopted={retries['adopted']} checked={retries['checked']} "
+                            f"errors={len(retries['errors'])}"
+                        )
             except Exception as exc:
                 print(f"[continuous-learning] {exc!r}")
             self.stop_event.wait(self.poll_seconds)
+
+    def stop(self):
+        self.stop_event.set()
+
+
+class AlertOutboxRefresher(threading.Thread):
+    def __init__(self):
+        super().__init__(name="argus-alert-outbox", daemon=True)
+        self.stop_event = threading.Event()
+
+    def run_once(self):
+        return send_pending(limit=100)
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                queue_due_digests()
+                self.run_once()
+            except Exception as exc:
+                print(f"[alert-outbox] {exc!r}")
+            self.stop_event.wait(30)
 
     def stop(self):
         self.stop_event.set()
@@ -1083,6 +1127,35 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if not self._authorize_api(parsed.path):
             return
+        if parsed.path == "/api/services":
+            learning = continuous_learning_payload()
+            code = code_evolution_payload()
+            deep = deep_learning_payload()
+            cycle = learning.get("last_cycle") or {}
+            evaluation = code.get("last_evaluation") or {}
+            self._json({"runtime": _service_monitor.payload() if _service_monitor else {"all_enabled_alive": False, "services": []},
+                        "agent": research_agent.runtime_status(),
+                        "learning": {"status": cycle.get("status"), "phase": cycle.get("phase"),
+                                     "data_asof": cycle.get("data_asof"), "errors": cycle.get("errors"),
+                                     "progress": cycle.get("progress"), "predictions": learning.get("predictions"),
+                                     "model_version": (learning.get("active_model") or {}).get("version_key")},
+                        "evolution": {"automatic": code.get("automatic_activation"),
+                                      "active_version": (code.get("active_version") or {}).get("version_key"),
+                                      "last_status": evaluation.get("status"), "gate": evaluation.get("gate"),
+                                      "rollback_available": code.get("rollback_available")},
+                        "deep_learning": {"base_model_ready": deep.get("base_model_ready"),
+                                          "active_version": (deep.get("active_model") or {}).get("version_key")}})
+            return
+        if parsed.path == "/api/research-agent":
+            self._json({"runtime": research_agent.runtime_status(), "runs": research_agent.list_runs()})
+            return
+        research_match = re.fullmatch(r"/api/research-agent/runs/(research_[a-f0-9]{32})", parsed.path)
+        if research_match:
+            try:
+                self._json(research_agent.get_run(research_match.group(1)))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            return
         if parsed.path == "/api/health":
             virtual_environment = os.environ.get("CONDA_PREFIX") or os.environ.get("VIRTUAL_ENV")
             if not virtual_environment:
@@ -1103,6 +1176,7 @@ class Handler(BaseHTTPRequestHandler):
                          (SELECT COUNT(*) FROM source_document_versions) AS document_versions"""
                 ).fetchone())
             self._json({"status": "ok", "api_version": 2, "database": "sqlite",
+                        "background_services": _service_monitor.payload() if _service_monitor else None,
                         "runtime": {"python_executable": sys.executable,
                                     "python_version": sys.version.split()[0],
                                     "is_virtual_environment": virtual_environment is not None,
@@ -1111,6 +1185,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "runtime_identity": f"{ROOT.stat().st_dev}:{ROOT.stat().st_ino}",
                                     "runtime_revision": RUNTIME_REVISION,
                                     "plugin_version": PLUGIN_VERSION,
+                                    "process_id": os.getpid(),
+                                    "data_lake_singleton": True,
                                     "data_lake": str(DATA_LAKE.resolve())},
                         "network": {"bind_address": os.environ.get("ARGUS_BIND_ADDRESS", "127.0.0.1"),
                                     "public_host": os.environ.get("ARGUS_PUBLIC_HOST", "127.0.0.1")},
@@ -1142,6 +1218,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/notifications":
             self._json(notification_payload())
+            return
+        if parsed.path == '/api/email-settings':
+            self._json(public_settings())
             return
         if parsed.path == "/api/notification-subscriptions":
             self._json(subscription_payload())
@@ -1280,6 +1359,21 @@ class Handler(BaseHTTPRequestHandler):
             if length < 0 or length > 5_000_000:
                 raise ValueError("invalid body size")
             payload = json.loads(self.rfile.read(length)) if length else {}
+            if path == "/api/research-agent/runs":
+                self._json(research_agent.submit(payload.get("question"), payload.get("parent_key")), HTTPStatus.ACCEPTED)
+                return
+            research_cancel = re.fullmatch(r"/api/research-agent/runs/(research_[a-f0-9]{32})/cancel", path)
+            if research_cancel:
+                self._json(research_agent.cancel_run(research_cancel.group(1)))
+                return
+            if path == "/api/research-agent/evolve":
+                self._json(create_harness_run("continuous_learning", {
+                    "phase": "POST_CLOSE", "stock_limit": 20, "auto_promote": True,
+                    "auto_promote_code": True, "refresh_data": True, "collect_sentiment": True,
+                    "evolve_intraday": True, "evolve_source_code": True, "train_deep_model": True,
+                    "retry_if_stale": True,
+                }, intent="投资人请求运行数据更新、预测评分和策略自进化闭环", requested_by="research_agent"), HTTPStatus.ACCEPTED)
+                return
             if path == "/api/models":
                 actor = str(payload.get("created_by") or "").strip()
                 self._json(create_model_definition(payload, actor), HTTPStatus.CREATED)
@@ -1297,6 +1391,30 @@ class Handler(BaseHTTPRequestHandler):
                 status = ("ACKNOWLEDGED" if signal_action.group(2) == "acknowledge"
                           else "DISMISSED")
                 self._json(update_signal_status(int(signal_action.group(1)), status))
+                return
+            if path == '/api/email-settings':
+                self._json(save_settings(payload))
+                return
+            if path == '/api/email-settings/verify':
+                self._json(verify_connection())
+                return
+            if path == '/api/digests/preview':
+                self._json(build_digest(payload))
+                return
+            if path == '/api/digests/send':
+                if not smtp_status().get('configured') or not smtp_status().get('send_enabled'):
+                    raise ValueError('请先配置发件邮箱并打开邮件发送；可以先预览日报')
+                result = queue_digest(int(payload['subscription_id']), payload.get('report_date'))
+                result['delivery'] = send_pending()
+                self._json(result)
+                return
+            received_match = re.fullmatch(r'/api/notifications/(\d+)/received', path)
+            if received_match:
+                self._json(confirm_received(int(received_match.group(1))))
+                return
+            retry_match = re.fullmatch(r'/api/notifications/(\d+)/retry', path)
+            if retry_match:
+                self._json(retry_message(int(retry_match.group(1))))
                 return
             if path == "/api/notification-subscriptions":
                 self._json(create_subscription(payload), HTTPStatus.CREATED)
@@ -1317,6 +1435,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/notifications/send":
                 self._json(send_pending(limit=max(1, min(int(payload.get("limit", 50)), 200))))
+                return
+            if path == "/api/service/shutdown":
+                if (not ipaddress.ip_address(_client_ip(self.client_address)).is_loopback
+                        or payload.get("confirmed") is not True):
+                    self._json({"error": "local confirmation required"}, HTTPStatus.FORBIDDEN)
+                    return
+                self._json({"status": "STOPPING"})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
             if path == "/api/search/reindex":
                 count = sync_semantic_index()
@@ -1490,6 +1616,32 @@ class Handler(BaseHTTPRequestHandler):
 def run(host="127.0.0.1", port=8765):
     if not ipaddress.ip_address(host).is_loopback and not _configured_remote_token():
         raise RuntimeError("non-loopback service requires ARGUS_REMOTE_TOKEN_FILE")
+    lock = ProcessLock(DATA_LAKE / "cache" / "service.lock")
+    if not lock.acquire():
+        raise RuntimeError("this data lake already has a running service; reuse it or explicitly replace it")
+    try:
+        # Bind before starting jobs so a port conflict cannot leave orphan workers.
+        with closing(_server_class_for_host(host)((host, port), Handler)) as server:
+            descriptor = {
+                "process_id": os.getpid(), "python_executable": sys.executable,
+                "runtime_root": str(ROOT.resolve()), "data_lake": str(DATA_LAKE.resolve()),
+                "plugin_version": PLUGIN_VERSION, "runtime_revision": RUNTIME_REVISION,
+                "bind_address": host, "port": port,
+                "public_host": os.environ.get("ARGUS_PUBLIC_HOST", "127.0.0.1"),
+                "token_file": os.environ.get("ARGUS_REMOTE_TOKEN_FILE", ""),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            descriptor_path = DATA_LAKE / "cache" / "service.json"
+            temporary = descriptor_path.with_suffix(f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(descriptor), encoding="utf-8")
+            os.replace(temporary, descriptor_path)
+            _run_service(server, host, port)
+    finally:
+        lock.release()
+
+
+def _run_service(server, host, port):
+    global _service_monitor
     initialize()
     interrupted_harness_runs = recover_interrupted_harness_runs()
     interrupted_quant_runs = recover_interrupted_quant_runs()
@@ -1502,6 +1654,8 @@ def run(host="127.0.0.1", port=8765):
     harness_refresher = None
     continuous_learning_refresher = None
     sector_cache_refresher = None
+    outbox_refresher = AlertOutboxRefresher()
+    outbox_refresher.start()
     if os.environ.get("ARGUS_LIVE_REFRESH_ENABLED", "1") == "1":
         refresher = MarketDataRefresher()
         refresher.start()
@@ -1521,7 +1675,20 @@ def run(host="127.0.0.1", port=8765):
     if os.environ.get("ARGUS_SECTOR_CACHE_ENABLED", "1") == "1":
         sector_cache_refresher = SectorCacheRefresher()
         sector_cache_refresher.start()
-    server = _server_class_for_host(host)((host, port), Handler)
+    agent_worker = research_agent.start_worker()
+    _service_monitor = ServiceMonitor()
+    for key, label, worker, factory in (
+        ("market", "行情与历史数据更新", refresher, MarketDataRefresher),
+        ("reports", "研报与资料同步", report_refresher, ReportLibraryRefresher),
+        ("report_increment", "研报每日增量", daily_report_refresher, DailyReportIncrementRefresher),
+        ("audit", "研究质量巡检", harness_refresher, AutonomousHarnessRefresher),
+        ("learning", "预测评分与策略自进化", continuous_learning_refresher, ContinuousLearningRefresher),
+        ("sector", "板块行情与财务缓存", sector_cache_refresher, SectorCacheRefresher),
+        ("outbox", "通知队列处理", outbox_refresher, AlertOutboxRefresher),
+        ("codex", "投资研究助手", agent_worker, research_agent.start_worker),
+    ):
+        _service_monitor.register(key, label, worker, factory, enabled=worker is not None)
+    _service_monitor.start()
     display_host = f"[{host}]" if ":" in host else host
     print(f"Market Intelligence Agent running at http://{display_host}:{port}")
     if interrupted_harness_runs:
@@ -1536,6 +1703,8 @@ def run(host="127.0.0.1", port=8765):
     except KeyboardInterrupt:
         pass
     finally:
+        if _service_monitor:
+            _service_monitor.stop()
         if refresher:
             refresher.stop()
         if report_refresher:
@@ -1548,6 +1717,7 @@ def run(host="127.0.0.1", port=8765):
             continuous_learning_refresher.stop()
         if sector_cache_refresher:
             sector_cache_refresher.stop()
+        outbox_refresher.stop()
         server.server_close()
 
 

@@ -192,11 +192,13 @@ def _coverage(rows: list[dict], source_rows: list[dict], source_interval_minutes
     }
 
 
-def build_chart_series(conn, symbol: str, period: str) -> dict:
+def build_chart_series(conn, symbol: str, period: str, data_asof: str | None = None) -> dict:
+    from .market_quality import contiguous_daily_window
     if period not in SUPPORTED_PERIODS:
         raise ValueError(f"unsupported period: {period}")
     source_interval_minutes = None
     coverage_source = []
+    daily_quality = None
     if period in {"time", "5d"} or period.endswith("m") and period != "1mo":
         requested_minutes = None if period in {"time", "5d"} else int(period[:-1])
         native_minutes = 60 if requested_minutes == 120 else requested_minutes
@@ -205,6 +207,8 @@ def build_chart_series(conn, symbol: str, period: str) -> dict:
             native_minutes = 1
             source = _minute_source_rows(conn, symbol, 1)
         source_interval_minutes = native_minutes or 1
+        if data_asof:
+            source = [row for row in source if str(row["bar_time"])[:10] <= data_asof]
         coverage_source = list(source)
         if period == "time" and source:
             latest = max(row["bar_time"][:10] for row in source)
@@ -227,10 +231,16 @@ def build_chart_series(conn, symbol: str, period: str) -> dict:
             chart_type = "candlestick"
     else:
         source = _daily_source_rows(conn, symbol)
+        if data_asof:
+            source = [row for row in source if str(row["trade_date"])[:10] <= data_asof]
+        source, daily_quality = contiguous_daily_window(source)
         coverage_source = source
         rows = add_ma5(aggregate_calendar(source, period))
         chart_type = "candlestick"
     add_technical_indicators(rows, symbol)
+    coverage = _coverage(rows, coverage_source, source_interval_minutes, period)
+    if daily_quality:
+        coverage["data_quality"] = daily_quality
     return {"period": period, "period_label": SUPPORTED_PERIODS[period],
             "chart_type": chart_type, "series": rows, "supports_ma5": chart_type == "candlestick",
-            "coverage": _coverage(rows, coverage_source, source_interval_minutes, period)}
+            "coverage": coverage}

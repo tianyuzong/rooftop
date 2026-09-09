@@ -16,6 +16,17 @@ class AgentHarnessTests(unittest.TestCase):
             initialize=lambda: initialize(path),
         )
 
+    def test_strategy_activation_is_automatic_but_other_writes_still_require_approval(self):
+        strategy_spec = agent_harness.TOOL_SPECS["activate_strategy_experiment"]
+        self.assertEqual(strategy_spec["risk_level"], "INTERNAL_WRITE")
+        self.assertFalse(strategy_spec["approval_required"])
+        self.assertTrue(agent_harness.TOOL_SPECS["activate_candidate"]["approval_required"])
+        self.assertTrue(agent_harness.TOOL_SPECS["rollback_version"]["approval_required"])
+        plan = agent_harness._build_plan(
+            "strategy_activation", {"experiment_key": "experiment_test"}
+        )
+        self.assertIn("自动激活", plan[-1]["summary"])
+
     @staticmethod
     def _successful_stock_tool(tool_name, arguments):
         if tool_name == "resolve_stocks":

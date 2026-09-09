@@ -11,6 +11,8 @@
   <link rel="stylesheet" href="/stock-compare.css">
   <link rel="stylesheet" href="/logic.css">
   <link rel="stylesheet" href="/contrast.css">
+  <link rel="stylesheet" href="/research-agent.css">
+  <link rel="stylesheet" href="/mail-center.css">
 </head>
 <body>
   <div class="shell">
@@ -20,6 +22,7 @@
         <span><strong>ROOFTOP</strong><small>MARKET INTELLIGENCE</small></span>
       </a>
       <nav aria-label="主导航">
+        <button class="nav-item" data-view="agent"><span>✧</span> 投资研究助手</button>
         <button class="nav-item active" data-view="signals"><span>!</span> 信号中心</button>
         <button class="nav-item" data-view="compare"><span>↔</span> 股票对比</button>
         <button class="nav-item" data-view="overview"><span>◫</span> 市场总览</button>
@@ -48,12 +51,36 @@
 
       <section id="warning" class="warning-strip" role="status">正在载入本地分析数据…</section>
 
+      <div id="agentView" class="view">
+        <section class="agent-intro">
+          <div><p class="eyebrow">ROOFTOP RESEARCH</p><h2>从你的投资想法开始</h2><p>描述目标、期限与能承受的风险。研究员将调用本地行情、财务与模型，给出有证据的分析和情景区间。</p></div>
+          <span id="agentConnection" class="agent-badge">正在连接…</span>
+        </section>
+        <div class="agent-layout">
+          <div class="agent-main">
+            <form id="agentForm" class="agent-composer">
+              <label for="agentQuestion">投资研究需求</label>
+              <textarea id="agentQuestion" rows="4" maxlength="6000" required placeholder="例如：我有 20 万，计划持有 6 个月，最多接受 10% 回撤。比较宁德时代和比亚迪，分析成长性与风险，画出未来情景。"></textarea>
+              <div class="agent-examples"><button type="button" data-example="比较贵州茅台和五粮液，我有10万元，投资12个月，最大回撤15%，最多持有2只。请分析估值、盈利质量与未来情景。">白酒双股对比</button><button type="button" data-example="20万元投资新能源板块，期限6个月，最大回撤10%，最多3只，偏稳健。请分析当前机会、风险与未来情景。">新能源组合研究</button></div>
+              <div class="agent-submit-row"><label class="agent-follow"><input id="agentFollowup" type="checkbox"> 延续当前研究追问</label><button id="agentSubmit" class="primary-button" type="submit">开始研究 ↗</button></div>
+              <small>需求及精选研究证据会发送至你已登录的 Codex。数值预测来自本地模型，目标收益不代表收益承诺。</small>
+            </form>
+            <section id="agentProgress" class="agent-panel" aria-live="polite" hidden></section>
+            <section id="agentResult" class="agent-result" aria-live="polite"></section>
+          </div>
+          <aside class="agent-aside">
+            <section class="agent-panel"><div class="agent-panel-title"><h3>运行状态</h3><button id="agentRefresh" type="button">刷新</button></div><div id="agentServices">正在检查后台…</div></section>
+            <section class="agent-panel"><h3>持续学习与进化</h3><div id="agentEvolution">正在读取评估结果…</div><button id="agentEvolve" class="secondary-button" type="button">运行一次学习闭环</button><p id="agentEvolutionMessage" class="agent-muted" aria-live="polite"></p></section>
+            <section class="agent-panel"><h3>研究记录</h3><div id="agentHistory"></div></section>
+          </aside>
+        </div>
+      </div>
       <div id="signalsView" class="view active">
         <section class="signal-summary" aria-labelledby="signalsHeading">
           <div>
             <p class="eyebrow">POST-CLOSE RESEARCH SIGNALS</p>
-            <h2 id="signalsHeading">盘后研究信号</h2>
-            <p>所有信号均需人工复核。系统不会连接券商，也不会自动下单。</p>
+            <h2 id="signalsHeading">我的投资日报与提醒</h2>
+            <p>选择大盘总结、关注公司或研究信号。日报默认总结昨天，可预览指定日期的内容。</p>
           </div>
           <div class="signal-kpis">
             <span>待复核<strong id="signalUnread">0</strong></span>
@@ -63,23 +90,45 @@
         </section>
 
         <section class="signal-layout">
-          <div class="signal-feed-band">
+          <details class="signal-feed-band mail-signal-details">
+            <summary>买入、卖出与调仓研究信号（可选）</summary>
             <div class="panel-head"><div><p class="eyebrow">SIGNAL FEED</p><h2>买入、卖出与调仓提醒</h2></div><button id="refreshSignals" class="secondary-button" type="button">刷新</button></div>
             <div id="signalFeed" class="signal-feed"><div class="search-loading">正在读取盘后信号…</div></div>
-          </div>
+          </details>
           <aside class="notification-band">
             <div class="panel-head"><div><p class="eyebrow">NOTIFICATIONS</p><h2>邮件订阅</h2></div><span class="lock">只读交易</span></div>
+            <div id="mailDeliveryStatus" class="mail-status" role="status">正在检查发信配置…</div>
             <form id="subscriptionForm" class="subscription-form">
-              <label>订阅名称<input id="subscriptionName" value="盘后信号提醒" required></label>
-              <label>收件邮箱<input id="subscriptionTarget" type="email" placeholder="research@example.com" required></label>
-              <fieldset><legend>提醒类型</legend><label><input type="checkbox" name="signalEvent" value="BUY" checked> 买入</label><label><input type="checkbox" name="signalEvent" value="SELL" checked> 卖出</label><label><input type="checkbox" name="signalEvent" value="REBALANCE" checked> 调仓</label></fieldset>
-              <label>最低置信度<input id="subscriptionConfidence" type="number" min="0" max="100" value="0"><small>0–100%</small></label>
+              <input id="subscriptionId" type="hidden">
+              <label>订阅名称<input id="subscriptionName" value="我的投资日报" required></label>
+              <label>收件邮箱<input id="subscriptionTarget" type="email" required autocomplete="email"></label>
+              <fieldset><legend>选择邮件内容</legend><label><input type="checkbox" name="digestKind" value="MARKET" checked> 昨日大盘总结</label><label><input type="checkbox" name="digestKind" value="COMPANIES"> 关注公司情况</label><label><input id="includeSignals" type="checkbox"> 买入、卖出与调仓研究信号</label></fieldset>
+              <label id="watchStocksField" hidden>关注股票<input id="subscriptionStocks" placeholder="名称或六位代码，用逗号分隔"><small>例如：宁德时代，688012。关注名单不会写入持仓。</small></label>
+              <div id="signalOptions" hidden><fieldset><legend>信号类型</legend><label><input type="checkbox" name="signalEvent" value="BUY" checked> 买入</label><label><input type="checkbox" name="signalEvent" value="SELL" checked> 卖出</label><label><input type="checkbox" name="signalEvent" value="REBALANCE" checked> 调仓</label></fieldset><label>最低置信度<input id="subscriptionConfidence" type="number" min="0" max="100" value="0"></label></div>
+              <label>每日发送时间（北京时间）<input id="subscriptionTime" type="time" value="08:30" required><small>每天发送前一天的总结；本机服务需保持运行。</small></label>
               <button class="primary-button" type="submit">保存订阅</button>
+              <label>预览／补发日期<input id="digestDate" type="date" required></label>
+              <div class="mail-actions"><button id="digestPreviewButton" class="secondary-button" type="button">预览日报</button><button id="digestSendButton" class="secondary-button" type="button">发送这一天的日报</button></div>
+              <p id="mailActionMessage" class="mail-message" role="status"></p>
             </form>
             <div id="subscriptionList" class="subscription-list"></div>
+            <details id="mailSettings" class="mail-settings"><summary>配置发件邮箱</summary>
+              <form id="smtpForm" class="subscription-form">
+                <label>发件邮箱<input id="smtpUser" type="email" required autocomplete="username"></label>
+                <label>SMTP 服务器<input id="smtpHost" value="smtp.163.com" required></label>
+                <div class="mail-settings-row"><label>加密方式<select id="smtpSecurity"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option></select></label><label>端口<input id="smtpPort" type="number" min="1" max="65535" value="465" required></label></div>
+                <label>SMTP 授权码<input id="smtpPassword" type="password" autocomplete="new-password" placeholder="已保存时留空可保留"><small>授权码使用本机 Windows 账户加密保存。163 邮箱需先开启 SMTP 服务。</small></label>
+                <label class="mail-checkbox"><input id="smtpEnabled" type="checkbox" checked> 启用邮件发送</label>
+                <button class="primary-button" type="submit">保存并验证连接</button>
+                <p id="smtpMessage" class="mail-message" role="status"></p>
+              </form>
+            </details>
+
           </aside>
         </section>
 
+        <section id="digestPreview" class="panel mail-preview" hidden><div class="panel-head"><h2>日报预览</h2></div><pre id="digestPreviewText"></pre></section>
+        <section class="panel mail-history"><div class="panel-head"><h2>邮件发送记录</h2><small>“服务器已接受”与“已确认收到”分别记录</small></div><div id="mailHistory">暂无发送记录</div></section>
         <details class="model-registry-band professional-disclosure">
           <summary>专业数据与模型管理</summary>
           <div class="model-registry-body">
@@ -148,7 +197,8 @@
       </div>
 
       <div id="overviewView" class="view">
-        <section class="summary-grid">
+        <div class="portfolio-tools"><span id="portfolioEmptyNote">当前没有持仓，行情与公司研究仍可正常使用。</span><button id="portfolioImportOpen" class="secondary-button" type="button">导入真实持仓（可选）</button></div>
+        <section id="portfolioSummary" class="summary-grid" hidden>
           <article class="metric-card">
             <span>持仓市值</span><strong id="portfolioValue">—</strong><small id="portfolioValueDetail">未录入真实持仓</small>
           </article>
@@ -199,16 +249,13 @@
           </aside>
         </section>
 
-        <section class="lower-grid">
+        <section id="portfolioSection" class="lower-grid portfolio-section" hidden>
           <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">真实账户</p><h2>我持有的股票</h2></div><div class="position-actions"><span class="count" id="positionCount">0 项</span><button id="portfolioImportOpen" class="secondary-button" type="button">导入持仓</button><button id="portfolioClear" class="icon-button" type="button" title="清空当前真实持仓" aria-label="清空当前真实持仓" hidden>×</button></div></div>
+            <div class="panel-head"><div><p class="eyebrow">真实账户</p><h2>我持有的股票</h2></div><div class="position-actions"><span class="count" id="positionCount">0 项</span><button id="portfolioClear" class="icon-button" type="button" title="清空当前真实持仓" aria-label="清空当前真实持仓" hidden>×</button></div></div>
             <div id="portfolioMeta" class="portfolio-meta" aria-live="polite">尚未导入真实持仓</div>
             <div class="table-wrap"><table><thead><tr><th>股票</th><th>数量</th><th>市值</th><th>盈亏</th><th>风险提示</th></tr></thead><tbody id="positionsBody"></tbody></table></div>
           </article>
-          <article class="panel">
-            <div class="panel-head"><div><p class="eyebrow">RESEARCH QUEUE</p><h2>待验证假设</h2></div><div class="research-coverage"><span>证据覆盖度</span><strong id="evidenceCoverage">暂无</strong><small id="evidenceCoverageDetail">尚无可计算的研究报告</small></div></div>
-            <div id="hypothesisList" class="hypothesis-list"></div>
-          </article>
+
         </section>
       </div>
 
@@ -258,7 +305,9 @@
     </form>
   </dialog>
   <div id="toast" class="toast" role="status"></div>
+  <script src="/mail-center.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/stock-compare.js" defer></script>
+  <script src="/research-agent.js" defer></script>
 </body>
 </html>

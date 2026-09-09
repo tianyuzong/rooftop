@@ -860,13 +860,13 @@ def _summary(timeframes: list[dict], horizon_months: int, risk_profile: str) -> 
 def build_timeframe_forecast(conn, symbol: str, data_asof: str,
                              horizon_months: int, risk_profile: str) -> dict[str, Any]:
     """Build only forecast horizons that pass chronological calibration gates."""
-    daily_payload = build_chart_series(conn, symbol, "1d")
+    daily_payload = build_chart_series(conn, symbol, "1d", data_asof=data_asof)
     daily_rows = [
         row for row in daily_payload["series"]
         if str(row.get("time") or "")[:10] <= data_asof
     ]
     try:
-        market_payload = build_chart_series(conn, "000001.SH", "1d")
+        market_payload = build_chart_series(conn, "000001.SH", "1d", data_asof=data_asof)
         market_rows = [
             row for row in market_payload["series"]
             if str(row.get("time") or "")[:10] <= data_asof
@@ -881,7 +881,7 @@ def build_timeframe_forecast(conn, symbol: str, data_asof: str,
     timeframes = []
     for spec in TIMEFRAME_SPECS:
         if spec["intraday"]:
-            payload = build_chart_series(conn, symbol, str(spec["period"]))
+            payload = build_chart_series(conn, symbol, str(spec["period"]), data_asof=data_asof)
             rows = [
                 row for row in payload["series"]
                 if str(row.get("time") or "")[:10] <= data_asof
@@ -915,6 +915,7 @@ def build_timeframe_forecast(conn, symbol: str, data_asof: str,
     )
     return {
         "symbol": symbol, "data_asof": data_asof,
+        "data_quality": daily_coverage.get("data_quality"),
         "timeframes": timeframes,
         "requested_forecast": requested_forecast,
         **path,

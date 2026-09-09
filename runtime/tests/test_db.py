@@ -44,7 +44,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(sources["eastmoney"], 0)
         self.assertEqual(sources["baostock"], 0)
 
-    def test_seed_is_idempotent_and_labels_hypotheses_unverified(self):
+    def test_seed_is_idempotent_and_does_not_create_user_hypotheses(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.db"
             initialize(path)
@@ -60,7 +60,7 @@ class DatabaseTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM reports WHERE report_type='SYSTEM_BOOTSTRAP'"
                 ).fetchone()[0], 0)
                 statuses = {row[0] for row in conn.execute("SELECT status FROM hypotheses")}
-                self.assertEqual(statuses, {"UNVERIFIED"})
+            self.assertEqual(statuses, set())
 
     def test_legacy_synthetic_portfolio_is_removed_without_deleting_real_rows(self):
         with tempfile.TemporaryDirectory() as folder:

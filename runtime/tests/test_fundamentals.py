@@ -5,10 +5,12 @@ from pathlib import Path
 
 from app.db import connect, initialize
 from app.fundamentals import (
+    _date,
     PROFILE_RULES,
     fundamental_snapshot,
     load_fundamental_timelines,
     refresh_fundamental_snapshots,
+    valuation_availability_date,
 )
 from app import strategy_evolution
 
@@ -40,6 +42,52 @@ def valuation(symbol="600519", **values):
 
 
 class FundamentalTests(unittest.TestCase):
+    def test_current_valuation_cannot_be_backdated_during_ingestion_or_lookup(self):
+        current = valuation(source_code="eastmoney_quote_profile",
+                            observed_at="2026-08-30T17:00:00+00:00")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "fundamentals.db"
+            initialize(path)
+            factory = lambda: connect(path)
+            result = refresh_fundamental_snapshots(
+                ["600519"], "2026-08-28", report_fetcher=lambda _: [],
+                valuation_fetcher=lambda _: dict(current), conn_factory=factory,
+            )
+            self.assertEqual(result["valuation_asof_by_symbol"], {"600519": "2026-08-31"})
+            timeline = load_fundamental_timelines(["600519"], factory)
+            self.assertFalse(fundamental_snapshot(timeline, "600519", "2026-08-28", "balanced")["available"])
+            self.assertTrue(fundamental_snapshot(timeline, "600519", "2026-08-31", "balanced")["available"])
+        legacy = {"valuations": {"600519": [{**current, "asof_date": "2026-08-28"}]}}
+        self.assertFalse(fundamental_snapshot(legacy, "600519", "2026-08-28", "balanced")["available"])
+        self.assertIsNone(valuation_availability_date({**current, "observed_at": "nan"}))
+
+    def test_explicit_historical_provider_date_is_preserved(self):
+        historical = valuation(source_code="dated_historical_provider", asof_date="2026-08-28",
+                               observed_at="2026-09-06T00:00:00+00:00")
+        self.assertEqual(valuation_availability_date(historical), "2026-08-28")
+
+    def test_invalid_dates_are_rejected_at_ingestion_and_lookup(self):
+        for value in (None, float("nan"), "nan", "NaT", "", "2026-02-30"):
+            self.assertIsNone(_date(value))
+        self.assertEqual(_date("2026-09-04T12:00:00"), "2026-09-04")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "fundamentals.db"
+            initialize(path)
+            factory = lambda: connect(path)
+            result = refresh_fundamental_snapshots(
+                ["600519"], None, conn_factory=factory,
+                report_fetcher=lambda symbol: [report(notice_date="nan"), report()],
+            )
+            self.assertEqual(result["report_rows"], 1)
+            self.assertEqual(len(result["errors"]), 1)
+            with closing(factory()) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM fundamental_reports").fetchone()[0], 1)
+        snapshot = fundamental_snapshot(
+            {"reports": {"600519": [report(notice_date="")]}, "valuations": {}},
+            "600519", "2026-09-04", "balanced",
+        )
+        self.assertFalse(snapshot["available"])
+
     def test_signal_penalizes_missing_fundamentals_after_dataset_exists(self):
         closes = [100.0 + index for index in range(130)]
         data = {

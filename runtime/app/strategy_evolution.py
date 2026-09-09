@@ -7,6 +7,7 @@ allowlist; executable code and risk limits never mutate themselves.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
@@ -110,6 +111,9 @@ DEFAULT_EXECUTION = {
 
 HALF_YEAR_TRADING_DAYS = 126
 MIN_FORMATION_TRADING_DAYS = 190
+AUTOMATIC_STRATEGY_APPROVER = "Rooftop automatic risk gates"
+RETRY_ERROR_DELAY_SECONDS = 30 * 60
+RETRY_LEASE_TIMEOUT_SECONDS = 4 * 60 * 60
 
 
 def _now() -> str:
@@ -315,9 +319,14 @@ def _candidate_parameters(profile: str, mandate: dict, iteration: int) -> dict:
     window_scale, stop_scale, trail_scale, rebalance_delta, position_delta = variants[
         iteration % len(variants)]
     cycle = iteration // len(variants)
-    slow = max(20, int(round(base["slow_window"] * window_scale + cycle * 5)))
-    fast = min(slow - 5, max(5, int(round(base["fast_window"] * window_scale))))
-    momentum = max(10, int(round(base["momentum_window"] * window_scale)))
+    cycle_adjustment = (0, -10, 10, -20, 20, -5, 5, -15, 15)[cycle % 9]
+    slow = max(20, int(round(base["slow_window"] * window_scale + cycle_adjustment)))
+    fast = min(slow - 5, max(
+        5, int(round(base["fast_window"] * window_scale + cycle_adjustment * 0.25))
+    ))
+    momentum = max(
+        10, int(round(base["momentum_window"] * window_scale + cycle_adjustment * 0.5))
+    )
     risk_cap = _risk_budget(profile, mandate)
     hard_stop = mandate.get("stop_loss_pct")
     hard_trailing = mandate.get("trailing_stop_pct")
@@ -994,7 +1003,10 @@ def _insert_simulation(conn, experiment_id: int, candidate_id: int | None,
     )
 
 
-def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
+def run_strategy_evolution(inputs: dict, normalized: bool = False, *,
+                           candidate_offset: int = 0,
+                           retry_key: str | None = None,
+                           aligned_data: dict | None = None) -> dict:
     """Evolve three bounded parameter sets and evaluate on an untouched holdout."""
     initialize()
     mandate = inputs if normalized else normalize_mandate(inputs)
@@ -1027,7 +1039,7 @@ def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
         conn.commit()
 
     try:
-        data = _load_aligned_universe(mandate)
+        data = aligned_data or _load_aligned_universe(mandate)
         from .continuous_learning import build_online_probability_map
         data["prediction_scores"] = build_online_probability_map(data["symbols"])
         prediction_audit = _prediction_audit(
@@ -1039,7 +1051,9 @@ def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
             for profile in ("aggressive", "balanced", "conservative"):
                 candidates = []
                 for iteration in range(mandate["max_iterations"]):
-                    params = _candidate_parameters(profile, mandate, iteration)
+                    candidate_index = max(0, int(candidate_offset)) + iteration
+                    candidate_number = candidate_index + 1
+                    params = _candidate_parameters(profile, mandate, candidate_index)
                     fold_results = [simulate_portfolio(data, mandate, params, start, end)
                                     for start, end in validation_windows]
                     validation = _validation_summary(fold_results, params)
@@ -1047,14 +1061,14 @@ def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
                         """INSERT INTO strategy_evolution_candidates
                            (experiment_id,profile,iteration,params_json,validation_json,
                             feasible,score,created_at) VALUES(?,?,?,?,?,?,?,?)""",
-                        (experiment_id, profile, iteration + 1, _dump(params), _dump(validation),
+                        (experiment_id, profile, candidate_number, _dump(params), _dump(validation),
                          int(validation["feasible"]), validation["score"], _now()),
                     )
                     candidate_id = int(cursor.lastrowid)
                     for fold_index, simulation in enumerate(fold_results, 1):
                         _insert_simulation(conn, experiment_id, candidate_id,
                                            f"WALK_FORWARD_{fold_index}", profile, simulation)
-                    candidates.append({"id": candidate_id, "iteration": iteration + 1,
+                    candidates.append({"id": candidate_id, "iteration": candidate_number,
                                        "params": params, "validation": validation,
                                        "fold_results": fold_results})
                     conn.commit()
@@ -1182,7 +1196,10 @@ def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
                 "strategies": strategies,
                 "prediction_audit": prediction_audit,
                 "activation_eligible": activation_eligible,
-                "activation_requires_human_approval": True,
+                "automatic_activation": True,
+                "activation_requires_human_approval": False,
+                "retry_key": retry_key,
+                "candidate_offset": max(0, int(candidate_offset)),
                 "order_execution": False,
                 "limitations": [
                     "目标收益是软目标，不是收益承诺或硬卖出线。",
@@ -1216,6 +1233,343 @@ def run_strategy_evolution(inputs: dict, normalized: bool = False) -> dict:
         raise
 
 
+def _strategy_retry_key(mandate: dict) -> str:
+    payload = dict(mandate)
+    payload.pop("mandate_key", None)
+    digest = hashlib.sha256(_dump(payload).encode("utf-8")).hexdigest()[:24]
+    return f"strategy-retry-{digest}"
+
+
+def _timestamp_age_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds())
+
+
+def _activation_gate_details(result: dict) -> dict:
+    profiles = []
+    for strategy in result.get("strategies", []):
+        validation = strategy.get("validation", {})
+        profile_gate = {
+            "profile": strategy.get("profile"),
+            "validation_pass": bool(validation.get("feasible")),
+            "walk_forward_pass": bool(
+                validation.get("recursive_walk_forward", {}).get("feasible")
+            ),
+            "holdout_risk_pass": bool(
+                strategy.get("holdout", {}).get("metrics", {}).get("risk_pass")
+            ),
+            "non_regression_pass": bool(strategy.get("non_regression_pass")),
+        }
+        profile_gate["passed"] = all(
+            profile_gate[key] for key in (
+                "validation_pass", "walk_forward_pass", "holdout_risk_pass",
+                "non_regression_pass",
+            )
+        )
+        profiles.append(profile_gate)
+    return {
+        "passed": len(profiles) == 3 and all(item["passed"] for item in profiles),
+        "profiles": profiles,
+        "target_return_is_soft": True,
+        "risk_limits_unchanged": True,
+    }
+
+
+def _decode_retry_job(row) -> dict:
+    item = dict(row)
+    item["mandate"] = _load(item.pop("mandate_json"), {})
+    item["last_gate"] = _load(item.pop("last_gate_json"), {})
+    return item
+
+
+def _ensure_retry_job(mandate: dict) -> dict:
+    retry_key = _strategy_retry_key(mandate)
+    stamp = _now()
+    with closing(connect()) as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO strategy_evolution_retry_jobs
+               (retry_key,mandate_json,status,created_at,updated_at)
+               VALUES(?,?,'PENDING',?,?)""",
+            (retry_key, _dump(mandate), stamp, stamp),
+        )
+        row = conn.execute(
+            "SELECT * FROM strategy_evolution_retry_jobs WHERE retry_key=?", (retry_key,)
+        ).fetchone()
+        conn.commit()
+    return _decode_retry_job(row)
+
+
+def _last_experiment_result(experiment_key: str | None) -> dict:
+    if not experiment_key:
+        return {}
+    with closing(connect()) as conn:
+        row = conn.execute(
+            "SELECT result_json FROM strategy_evolution_runs WHERE experiment_key=?",
+            (str(experiment_key),),
+        ).fetchone()
+    return _load(row["result_json"], {}) if row else {}
+
+
+def _persist_automatic_result(result: dict) -> None:
+    experiment_key = result.get("experiment_key")
+    if not experiment_key:
+        return
+    persisted = dict(result)
+    persisted.pop("artifact_path", None)
+    with closing(connect()) as conn:
+        conn.execute(
+            "UPDATE strategy_evolution_runs SET result_json=? WHERE experiment_key=?",
+            (_dump(persisted), str(experiment_key)),
+        )
+        conn.commit()
+    artifact_path = result.get("artifact_path")
+    if artifact_path:
+        Path(artifact_path).write_text(_dump(persisted), encoding="utf-8")
+
+
+def run_strategy_evolution_with_auto_retry(inputs: dict, normalized: bool = False) -> dict:
+    """Run one fresh-data batch, auto-activate on pass, otherwise persist a retry."""
+    initialize()
+    mandate = inputs if normalized else normalize_mandate(inputs)
+    job = _ensure_retry_job(mandate)
+    if job["status"] == "COMPLETED":
+        result = _last_experiment_result(job.get("last_experiment_key"))
+        result.update({
+            "automatic_activation": True,
+            "activation_requires_human_approval": False,
+            "retry_status": "COMPLETED",
+            "retry_job": job,
+        })
+        return result
+
+    running_age = _timestamp_age_seconds(job.get("updated_at"))
+    if job["status"] == "RUNNING" and (
+            running_age is None or running_age < RETRY_LEASE_TIMEOUT_SECONDS):
+        result = _last_experiment_result(job.get("last_experiment_key"))
+        result.update({
+            "automatic_activation": True,
+            "activation_requires_human_approval": False,
+            "retry_status": "ALREADY_RUNNING",
+            "retry_job": job,
+        })
+        return result
+
+    try:
+        data = _load_aligned_universe(mandate)
+    except Exception as exc:
+        with closing(connect()) as conn:
+            conn.execute(
+                """UPDATE strategy_evolution_retry_jobs
+                   SET status='PENDING',last_error=?,updated_at=? WHERE retry_key=?""",
+                (repr(exc), _now(), job["retry_key"]),
+            )
+            conn.commit()
+        raise
+
+    same_rejected_snapshot = bool(
+        job.get("last_experiment_key") and not job.get("last_error") and
+        str(job.get("last_data_asof") or "") >= str(data["data_end"])
+    )
+    if same_rejected_snapshot:
+        with closing(connect()) as conn:
+            conn.execute(
+                "UPDATE strategy_evolution_retry_jobs SET updated_at=? WHERE retry_key=?",
+                (_now(), job["retry_key"]),
+            )
+            conn.commit()
+        result = _last_experiment_result(job.get("last_experiment_key"))
+        result.update({
+            "automatic_activation": True,
+            "activation_requires_human_approval": False,
+            "retry_status": "WAITING_FOR_NEW_DATA",
+            "retry_reason": "同一最终留出数据不反复调参；下一交易日数据入库后继续下一批候选",
+            "retry_job": job,
+        })
+        return result
+
+    if job.get("last_error"):
+        error_age = _timestamp_age_seconds(job.get("updated_at"))
+        if error_age is not None and error_age < RETRY_ERROR_DELAY_SECONDS:
+            result = _last_experiment_result(job.get("last_experiment_key"))
+            result.update({
+                "automatic_activation": True,
+                "activation_requires_human_approval": False,
+                "retry_status": "RETRY_SCHEDULED",
+                "retry_reason": "运行错误将在受控间隔后自动重试",
+                "retry_job": job,
+            })
+            return result
+
+    with closing(connect()) as conn:
+        updated = conn.execute(
+            """UPDATE strategy_evolution_retry_jobs
+               SET status='RUNNING',last_error=NULL,updated_at=?
+               WHERE retry_key=? AND status IN ('PENDING','RUNNING')""",
+            (_now(), job["retry_key"]),
+        )
+        conn.commit()
+    if updated.rowcount != 1:
+        return run_strategy_evolution_with_auto_retry(mandate, normalized=True)
+
+    try:
+        offset = max(0, int(job.get("next_candidate_offset") or 0))
+        result = run_strategy_evolution(
+            mandate, normalized=True, candidate_offset=offset,
+            retry_key=job["retry_key"], aligned_data=data,
+        )
+        gate = _activation_gate_details(result)
+        next_offset = offset + int(mandate["max_iterations"])
+        version = None
+        if gate["passed"]:
+            version = activate_strategy_experiment(result["experiment_key"])
+        stamp = _now()
+        with closing(connect()) as conn:
+            conn.execute(
+                """UPDATE strategy_evolution_retry_jobs
+                   SET status=?,attempt_count=attempt_count+1,next_candidate_offset=?,
+                       last_data_asof=?,last_experiment_key=?,active_version_key=?,
+                       last_gate_json=?,last_error=NULL,updated_at=?,completed_at=?
+                   WHERE retry_key=?""",
+                (
+                    "COMPLETED" if version else "PENDING", next_offset, data["data_end"],
+                    result["experiment_key"], version.get("version_key") if version else None,
+                    _dump(gate), stamp, stamp if version else None, job["retry_key"],
+                ),
+            )
+            saved = conn.execute(
+                "SELECT * FROM strategy_evolution_retry_jobs WHERE retry_key=?",
+                (job["retry_key"],),
+            ).fetchone()
+            conn.commit()
+        result.update({
+            "automatic_activation": True,
+            "activation_requires_human_approval": False,
+            "automatic_version": version,
+            "retry_status": "COMPLETED" if version else "PENDING_NEW_DATA",
+            "retry_reason": (
+                "全部门禁通过，已自动激活" if version else
+                "门禁未全部通过；固定风险约束不变，下一个交易日继续下一批候选"
+            ),
+            "retry_job": _decode_retry_job(saved),
+        })
+        _persist_automatic_result(result)
+        return result
+    except Exception as exc:
+        with closing(connect()) as conn:
+            conn.execute(
+                """UPDATE strategy_evolution_retry_jobs
+                   SET status='PENDING',last_error=?,updated_at=? WHERE retry_key=?""",
+                (repr(exc), _now(), job["retry_key"]),
+            )
+            conn.commit()
+        raise
+
+
+def _legacy_retry_allowed(mandate: dict) -> bool:
+    name = str(mandate.get("name") or "").strip()
+    normalized_name = name.casefold()
+    return not (
+        normalized_name.startswith(("harness-smoke", "smoke-", "test-")) or
+        name == "界面链路验证"
+    )
+
+
+def _adopt_unfinished_harness_experiments() -> int:
+    """Bring pre-upgrade Harness strategy experiments into the durable retry loop."""
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            """SELECT result_json FROM harness_tool_calls
+               WHERE tool_name='evolve_portfolio_strategies' AND status='SUCCEEDED'
+               ORDER BY id"""
+        ).fetchall()
+    adopted = 0
+    for row in rows:
+        result = _load(row["result_json"], {})
+        mandate = result.get("mandate")
+        experiment_key = result.get("experiment_key")
+        if not isinstance(mandate, dict) or not experiment_key:
+            continue
+        if not _legacy_retry_allowed(mandate):
+            continue
+        retry_key = _strategy_retry_key(mandate)
+        with closing(connect()) as conn:
+            if conn.execute(
+                "SELECT 1 FROM strategy_evolution_retry_jobs WHERE retry_key=?", (retry_key,)
+            ).fetchone():
+                continue
+            version_row = conn.execute(
+                """SELECT * FROM strategy_evolution_versions
+                   WHERE experiment_id=(SELECT id FROM strategy_evolution_runs WHERE experiment_key=?)
+                   AND status='ACTIVE' ORDER BY id DESC LIMIT 1""",
+                (experiment_key,),
+            ).fetchone()
+        version = _decode_version(version_row) if version_row else None
+        if not version and _activation_eligible(result):
+            version = activate_strategy_experiment(experiment_key)
+        gate = _activation_gate_details(result)
+        stamp = _now()
+        with closing(connect()) as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO strategy_evolution_retry_jobs
+                   (retry_key,mandate_json,status,attempt_count,next_candidate_offset,
+                    last_data_asof,last_experiment_key,active_version_key,last_gate_json,
+                    created_at,updated_at,completed_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    retry_key, _dump(mandate), "COMPLETED" if version else "PENDING", 1,
+                    int(mandate.get("max_iterations", 10)),
+                    result.get("data", {}).get("end"), experiment_key,
+                    version.get("version_key") if version else None, _dump(gate),
+                    stamp, stamp, stamp if version else None,
+                ),
+            )
+            adopted += conn.total_changes
+            conn.commit()
+    return adopted
+
+
+def retry_pending_strategy_evolutions(max_jobs: int = 1) -> dict:
+    """Advance pending strategies without reusing a rejected holdout snapshot."""
+    initialize()
+    adopted = _adopt_unfinished_harness_experiments()
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            """SELECT * FROM strategy_evolution_retry_jobs
+               WHERE status IN ('PENDING','RUNNING') ORDER BY updated_at,id LIMIT ?""",
+            (max(1, min(int(max_jobs), 20)),),
+        ).fetchall()
+    results, errors = [], []
+    for row in rows:
+        job = _decode_retry_job(row)
+        try:
+            result = run_strategy_evolution_with_auto_retry(job["mandate"], normalized=True)
+            results.append({
+                "retry_key": job["retry_key"],
+                "status": result.get("retry_status"),
+                "experiment_key": result.get("experiment_key"),
+                "version_key": (result.get("automatic_version") or {}).get("version_key"),
+            })
+        except Exception as exc:
+            errors.append({"retry_key": job["retry_key"], "error": repr(exc)})
+    return {
+        "status": "SUCCESS_WITH_WARNINGS" if errors else "SUCCESS",
+        "adopted": adopted,
+        "checked": len(rows),
+        "results": results,
+        "errors": errors,
+        "automatic_activation": True,
+        "risk_limits_unchanged": True,
+        "order_execution": False,
+    }
+
+
 def review_strategy_experiment(experiment_key: str) -> dict:
     initialize()
     with closing(connect()) as conn:
@@ -1237,11 +1591,10 @@ def review_strategy_experiment(experiment_key: str) -> dict:
     }
 
 
-def activate_strategy_experiment(experiment_key: str, approved_by: str) -> dict:
-    """Activate a fully risk-qualified experiment after Harness approval."""
-    actor = str(approved_by or "").strip()
-    if not actor:
-        raise PermissionError("策略版本激活必须记录批准人")
+def activate_strategy_experiment(experiment_key: str,
+                                 approved_by: str | None = None) -> dict:
+    """Atomically activate an experiment only after every deterministic gate passes."""
+    actor = str(approved_by or AUTOMATIC_STRATEGY_APPROVER).strip()
     initialize()
     with closing(connect()) as conn:
         row = conn.execute(
@@ -1330,10 +1683,24 @@ def strategy_evolution_payload(limit: int = 20) -> dict:
             "SELECT * FROM strategy_evolution_versions ORDER BY id DESC LIMIT ?",
             (max(1, min(int(limit), 100)),),
         )]
+        retry_jobs = [_decode_retry_job(row) for row in conn.execute(
+            """SELECT * FROM strategy_evolution_retry_jobs
+               ORDER BY updated_at DESC,id DESC LIMIT ?""",
+            (max(1, min(int(limit), 100)),),
+        )]
     return {
         "experiments": experiments,
         "versions": versions,
+        "retry_jobs": retry_jobs,
         "execution_defaults": DEFAULT_EXECUTION,
-        "automatic_activation": False,
+        "automatic_activation": True,
+        "retry_until_eligible": True,
+        "retry_policy": {
+            "gate_failure": "wait_for_next_completed_trading_day",
+            "runtime_failure": f"retry_after_{RETRY_ERROR_DELAY_SECONDS // 60}_minutes",
+            "candidate_batches": "unbounded_across_scheduled_cycles",
+            "same_holdout_repeated_tuning": False,
+            "risk_limits_unchanged": True,
+        },
         "order_execution": False,
     }

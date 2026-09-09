@@ -50,6 +50,7 @@ SECTOR_ALIASES = {
 
 RULE_SNAPSHOT_STANDARD_HISTORY_DAYS = 420
 RULE_SNAPSHOT_MINIMUM_HISTORY_DAYS = 252
+DAILY_REFRESH_BATCH_SIZE = 20
 
 
 def _now() -> str:
@@ -107,6 +108,8 @@ def normalize_quant_request(inputs: dict) -> dict:
         raise ValueError("量化任务输入必须是对象")
     stocks = _split(inputs.get("stocks"))
     sectors = _split(inputs.get("sectors"))
+    if any(re.fullmatch(r"[?\uff1f\ufffd\s]+", sector) for sector in sectors):
+        raise ValueError("板块名称包含无法恢复的乱码，请重新输入正确板块")
     if not stocks and not sectors:
         raise ValueError("候选股票和关注板块至少填写一项")
     if len(stocks) > 30:
@@ -890,9 +893,71 @@ def _feature_profile(technical: dict, learned: dict, candidate: dict,
     }
 
 
-def _refresh_daily(symbols: list[str]) -> dict:
+def _cached_daily_symbols(symbols: list[str], data_asof: str) -> set[str]:
+    unique = list(dict.fromkeys(str(symbol) for symbol in symbols))
+    if not unique:
+        return set()
+    placeholders = ",".join("?" for _ in unique)
+    with closing(connect()) as conn:
+        rows = conn.execute(
+            f"""SELECT DISTINCT asset_symbol FROM market_daily_bars
+                WHERE adjust_mode='qfq' AND trade_date>=?
+                  AND asset_symbol IN ({placeholders})""",
+            (str(data_asof), *unique),
+        ).fetchall()
+    return {str(row["asset_symbol"]) for row in rows}
+
+
+def _refresh_daily(symbols: list[str], cache_complete_asof: str | None = None) -> dict:
     from .continuous_learning import _refresh_market_data_isolated
-    return _refresh_market_data_isolated(symbols, include_minutes=False)
+
+    unique = list(dict.fromkeys(str(symbol) for symbol in symbols))
+    cached = (
+        _cached_daily_symbols(unique, cache_complete_asof)
+        if cache_complete_asof else set()
+    )
+    pending = [symbol for symbol in unique if symbol not in cached]
+    if not pending:
+        return {
+            "status": "CACHED", "data_asof": cache_complete_asof,
+            "requested_symbols": len(unique), "cached_symbols": len(cached),
+            "refreshed_symbols": 0, "batches": 0, "warnings": [],
+        }
+
+    batch_size = DAILY_REFRESH_BATCH_SIZE
+    batch_results, warnings = [], []
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start:start + batch_size]
+        try:
+            result = _refresh_market_data_isolated(batch, include_minutes=False)
+            batch_results.append({
+                "symbols": len(batch), "status": result.get("status", "REFRESHED")
+            })
+        except Exception as exc:
+            warnings.append({"symbols": batch, "error": repr(exc)})
+
+    if cache_complete_asof:
+        completed = _cached_daily_symbols(unique, cache_complete_asof)
+        missing = [symbol for symbol in unique if symbol not in completed]
+        if missing:
+            detail = warnings[-1]["error"] if warnings else "行情源未返回完整数据"
+            raise RuntimeError(
+                f"截至 {cache_complete_asof} 仍缺少 {len(missing)} 只股票的日线："
+                f"{','.join(missing[:10])}；{detail}"
+            )
+        refreshed_count = len(completed - cached)
+    else:
+        if warnings:
+            raise RuntimeError(warnings[-1]["error"])
+        refreshed_count = len(pending)
+
+    return {
+        "status": "REFRESHED_WITH_WARNINGS" if warnings else "REFRESHED",
+        "data_asof": cache_complete_asof,
+        "requested_symbols": len(unique), "cached_symbols": len(cached),
+        "refreshed_symbols": refreshed_count, "batches": len(batch_results),
+        "warnings": warnings,
+    }
 
 
 def _prepare_candidates(request: dict) -> dict:
@@ -911,7 +976,10 @@ def _prepare_candidates(request: dict) -> dict:
                                               request["max_positions"]))]
     refresh = {"status": "SKIPPED"}
     if request["refresh_data"]:
-        refresh = _refresh_daily([item["symbol"] for item in prefilter])
+        refresh = _refresh_daily(
+            [item["symbol"] for item in prefilter],
+            cache_complete_asof=request.get("_daily_cache_asof"),
+        )
     coverage = _history_coverage([item["symbol"] for item in prefilter])
     required_days = max(420, int(request.get("backtest_window_years", 3)) * 252)
     eligible = [item for item in prefilter
@@ -2698,6 +2766,7 @@ def _version_quant_result(conn, mandate_id: int, run_id: int, result: dict) -> d
     result["change_summary"] = _result_change_summary(previous_result, result)
     same_snapshot = bool(previous and
         previous_result.get("data", {}).get("end") == result.get("data", {}).get("end") and
+        previous_result.get("fundamental_time_policy") == result.get("fundamental_time_policy") and
         previous_result.get("recommendation", {}).get("model_version") == recommendation.get("model_version") and
         [item["symbol"] for item in previous_result.get("candidates", [])] ==
         [item["symbol"] for item in result.get("candidates", [])])
@@ -2707,7 +2776,7 @@ def _version_quant_result(conn, mandate_id: int, run_id: int, result: dict) -> d
             "new_snapshot": not same_snapshot,
             "thresholds": {"score_tolerance": 0.005,
                            "max_drawdown_pct": result["request"]["max_drawdown_pct"]}}
-    if same_snapshot:
+    if same_snapshot and risk_pass and non_regression:
         status = "UNCHANGED"
         version_key = str(previous["version_key"])
     elif risk_pass and non_regression:
@@ -2739,6 +2808,7 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
                         learning_cycle_id: int | None = None,
                         mandate_id: int | None = None) -> dict:
     initialize()
+    from .fundamentals import VALUATION_TIME_POLICY
     request = inputs if normalized else normalize_quant_request(inputs)
     stamp = _now()
     with closing(connect()) as conn:
@@ -2884,6 +2954,7 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
                 "method": "daily_prequential_prediction_then_outcome_update",
                 "live_selection_uses_latest_completed_bar_only": True,
             },
+            "fundamental_time_policy": VALUATION_TIME_POLICY,
             "data_refresh": {"universe": prepared["metadata"],
                              "market": prepared["market_refresh"], "sentiment": sentiment},
             "limitations": [
@@ -2954,20 +3025,54 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
 
 
 def refresh_active_quant_portfolios(learning_cycle_id: int | None = None,
-                                    trigger_kind: str = "daily_post_close") -> dict:
+                                    trigger_kind: str = "daily_post_close",
+                                    only_mandate_keys: list[str] | None = None) -> dict:
     initialize()
+    from .fundamentals import VALUATION_TIME_POLICY
     with closing(connect()) as conn:
         candidates = conn.execute(
             "SELECT * FROM quant_mandates WHERE status='ACTIVE' ORDER BY id DESC"
         ).fetchall()
+        cycle = (
+            conn.execute(
+                "SELECT cycle_date FROM harness_learning_cycles WHERE id=?",
+                (learning_cycle_id,),
+            ).fetchone()
+            if learning_cycle_id is not None else None
+        )
+    cache_complete_asof = str(cycle["cycle_date"]) if cycle else None
+    completed = {}
+    active_model_version = None
+    if learning_cycle_id is not None:
+        with closing(connect()) as conn:
+            active_model = conn.execute(
+                "SELECT version_key FROM prediction_model_versions WHERE status='ACTIVE' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            active_model_version = active_model[0] if active_model else None
+            for saved in conn.execute(
+                """SELECT mandate_id,result_json,prediction_model_version FROM quant_portfolio_runs
+                   WHERE learning_cycle_id=? AND trigger_kind=? AND status='SUCCESS'
+                   ORDER BY id DESC""", (learning_cycle_id, trigger_kind),
+            ):
+                completed.setdefault(int(saved["mandate_id"]), {
+                    **_load(saved["result_json"], {}),
+                    "checkpoint_model_version": saved["prediction_model_version"],
+                })
     rows, identities = [], set()
     for row in candidates:
+        saved = completed.get(int(row["id"]), {})
+        # Return this cycle's checkpoints too, so retry summaries replace stale versions.
+        # The loop below validates their model, policy, date and normalized constraints.
+        if (only_mandate_keys is not None and row["mandate_key"] not in only_mandate_keys
+                and not saved):
+            continue
         identity = _mandate_identity(_load(row["input_json"], {}))
         if identity in identities:
             continue
         identities.add(identity)
         rows.append(row)
     results, errors = [], []
+    reused = 0
     for row in rows:
         try:
             # Stored mandates can predate newer optional fields; normalize them again
@@ -2975,6 +3080,20 @@ def refresh_active_quant_portfolios(learning_cycle_id: int | None = None,
             request = normalize_quant_request(_load(row["input_json"], {}))
             request["refresh_data"] = True
             request["collect_sentiment"] = True
+            if cache_complete_asof:
+                request["_daily_cache_asof"] = cache_complete_asof
+            saved = completed.get(int(row["id"]), {})
+            if (saved.get("run_key") and saved.get("version")
+                    and saved.get("request")
+                    and saved.get("checkpoint_model_version") == active_model_version
+                    and saved.get("fundamental_time_policy") == VALUATION_TIME_POLICY
+                    and saved.get("data", {}).get("end") == cache_complete_asof
+                    and _mandate_identity(normalize_quant_request(saved["request"]))
+                    == _mandate_identity(normalize_quant_request(request))):
+                results.append({"mandate_key": row["mandate_key"], "run_key": saved["run_key"],
+                                "version": saved["version"], "reused_checkpoint": True})
+                reused += 1
+                continue
             result = run_quant_portfolio(
                 request, normalized=True, trigger_kind=trigger_kind,
                 learning_cycle_id=learning_cycle_id, mandate_id=int(row["id"]),
@@ -2984,7 +3103,7 @@ def refresh_active_quant_portfolios(learning_cycle_id: int | None = None,
                             "version": result["version"]})
         except Exception as exc:
             errors.append({"mandate_key": row["mandate_key"], "error": repr(exc)})
-    return {"mandates": len(rows), "updated": len(results),
+    return {"mandates": len(rows), "updated": len(results), "reused": reused,
             "results": results, "errors": errors}
 
 

@@ -57,7 +57,7 @@ class ServerConcurrencyTests(unittest.TestCase):
         self.assertIn('"X-Argus-Token"', content)
         self.assertIn("ARGUS_REMOTE_TOKEN_FILE", content)
         self.assertIn("Format-HttpHost", content)
-        self.assertIn('[ValidateSet("auto", "signals", "compare", "harness")]', content)
+        self.assertIn('[ValidateSet("auto", "signals", "compare", "harness", "agent")]', content)
         self.assertIn('if ($stockItems.Count) { "compare" } else { "signals" }', content)
         self.assertIn('$resolvedView -eq "compare"', content)
         self.assertIn('"${PublicScheme}://${urlHost}:$selectedPort/?view=$resolvedView"', content)
@@ -178,15 +178,18 @@ class ServerConcurrencyTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("/api/quant/decision", app_js)
-        handler = app_js.split("$('#quickQuantRun').onclick", 1)[1].split(
-            "$('#harnessWorkflow').onchange", 1
+        self.assertIn("$('#quickQuantRun').onclick=viewQuickQuantRecommendation", app_js)
+        handler = app_js.split("async function viewQuickQuantRecommendation(){", 1)[1].split(
+            "function scheduleHarnessPoll", 1
         )[0]
         self.assertIn("/api/quant/mandates", handler)
         self.assertNotIn("/api/harness/runs", handler)
         self.assertNotIn("refresh_data", handler)
         self.assertNotIn("collect_sentiment", handler)
-        self.assertIn("RULE_SNAPSHOT", handler)
-        self.assertIn("已生成样本外校准区间和研究复核", handler)
+        self.assertIn("quantDecisionOutputHtml(decision)", handler)
+        self.assertIn("output.scrollIntoView", handler)
+        self.assertIn("output.focus", handler)
+        self.assertIn("quantAllocationState(decision.result).blocked", handler)
         self.assertIn("即时多因子与K线预测", app_js)
         self.assertIn("stockForecastCurveSvg", app_js)
         self.assertIn("样本外校准区间", app_js)
@@ -261,7 +264,7 @@ class ServerConcurrencyTests(unittest.TestCase):
         process = Mock()
         process.poll.return_value = 0
         with patch.object(server.subprocess, "Popen", return_value=process) as popen:
-            self.assertTrue(refresher._launch_market_refresh(True, True))
+            self.assertTrue(refresher._launch_market_refresh(True, True, ["600519"]))
         arguments = popen.call_args.args[0]
         self.assertIn("app.data_sources.market", arguments)
         self.assertIn("--no-history", arguments)

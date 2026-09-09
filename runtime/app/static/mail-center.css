@@ -1,0 +1,26 @@
+.mail-status{padding:12px 14px;margin-bottom:14px;border:1px solid #79633d;border-radius:8px;background:#292318;color:#f2d59d;font-size:13px;line-height:1.7}
+.mail-status.ready{background:#102d27;border-color:#2d725e;color:#a0e7d2}
+.mail-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.mail-settings{margin-top:20px;border-top:1px solid #2a4650;padding-top:15px}
+.mail-settings summary{cursor:pointer;color:#a0e7d2;font-size:14px}
+.mail-settings-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mail-checkbox{display:flex!important;align-items:center;gap:8px!important}.mail-checkbox input{width:auto!important}
+.mail-message{color:#e7d5ab;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;margin:2px 0}
+.mail-subscription{display:grid;gap:7px;padding:14px 0;border-top:1px solid #2a4650;overflow-wrap:anywhere}
+.mail-subscription strong{font-size:14px;color:#e5f1ef}.mail-subscription span,.mail-subscription small{font-size:12px;color:#a6bcc1}
+.mail-preview,.mail-history{margin:20px 0;min-width:0}.mail-preview pre{white-space:pre-wrap;overflow-wrap:anywhere;color:#d4e3e5;font-family:inherit;font-size:14px;line-height:1.9}
+.mail-log{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:14px 0;border-top:1px solid #24414b}
+.mail-log>div{min-width:0;display:grid;gap:7px}.mail-log strong{font-size:14px;color:#e0eeed}.mail-log span,.mail-log small,.mail-muted{color:#aac0c5;font-size:12px}.mail-log p{color:#ebbd98;font-size:12px;overflow-wrap:anywhere}
+.portfolio-tools{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;color:#9db8bf;font-size:13px}.portfolio-section{grid-template-columns:minmax(0,1fr)}
+#signalsView [hidden],#overviewView [hidden]{display:none!important}
+#subscriptionForm fieldset{display:grid;grid-template-columns:1fr;gap:10px}#subscriptionForm fieldset label{display:flex;align-items:center;gap:8px;font-size:13px}#subscriptionForm fieldset input{width:auto}
+#subscriptionForm>label small,#smtpForm small{line-height:1.6;font-size:11px;color:#9eb6bd}
+.notification-band{min-width:0}.subscription-form>label,.subscription-form input,.subscription-form select{min-width:0}
+.signal-layout{grid-template-columns:minmax(0,1fr);gap:18px}.notification-band{position:static;order:-1;padding:0;border:0;width:100%}
+.notification-band .subscription-form{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}
+#subscriptionForm>fieldset,#watchStocksField,#signalOptions,#mailActionMessage,.notification-band .subscription-form>.primary-button,.mail-settings-row,#smtpMessage{grid-column:1/-1}
+.notification-band .subscription-form>.primary-button{justify-self:start;min-width:150px}.mail-actions{align-self:end;min-height:38px}
+#subscriptionForm>fieldset{grid-template-columns:repeat(3,minmax(0,1fr))}
+.mail-signal-details{border-top:1px solid #27424c;border-bottom:1px solid #27424c;padding:15px 0}.mail-signal-details>summary{cursor:pointer;color:#9ebbc3;font-size:13px}.mail-signal-details[open]>summary{margin-bottom:20px}
+@media(max-width:700px){.mail-log,.portfolio-tools{align-items:flex-start;flex-direction:column}.mail-settings-row{grid-template-columns:1fr}.mail-actions .secondary-button{flex:1}.mail-log .secondary-button{align-self:flex-start}}
+@media(max-width:700px){.notification-band .subscription-form,#subscriptionForm>fieldset{grid-template-columns:minmax(0,1fr)}}

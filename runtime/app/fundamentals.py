@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .db import connect
@@ -42,6 +42,12 @@ REPORT_FIELD_MAP = {
     "cashflow_to_profit": "NCO_NETPROFIT", "fcff": "FCFF_FORWARD",
 }
 
+CURRENT_QUOTE_SOURCES = frozenset({
+    "eastmoney_quote_profile", "tencent_quote_fallback", "unknown_quote_profile",
+})
+SHANGHAI = timezone(timedelta(hours=8))
+VALUATION_TIME_POLICY = "current_quotes_available_at_observation_v1"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -52,9 +58,10 @@ def _date(value: Any) -> str | None:
         return None
     try:
         parsed = value.to_pydatetime() if hasattr(value, "to_pydatetime") else value
-        return parsed.date().isoformat() if hasattr(parsed, "date") else str(value)[:10]
-    except Exception:
-        return str(value)[:10] or None
+        text = parsed.date().isoformat() if hasattr(parsed, "date") else str(parsed).strip()
+        return date.fromisoformat(text[:10]).isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _number(value: Any) -> float | None:
@@ -63,6 +70,21 @@ def _number(value: Any) -> float | None:
         return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
+
+
+def valuation_availability_date(value: dict) -> str | None:
+    """Undated current quotes cannot become historical observations by relabeling."""
+    asof = _date(value.get("asof_date"))
+    try:
+        observed = datetime.fromisoformat(str(value.get("observed_at") or ""))
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        observed_date = observed.astimezone(SHANGHAI).date().isoformat()
+    except (ValueError, TypeError, OverflowError):
+        observed_date = None
+    if value.get("source_code") in CURRENT_QUOTE_SOURCES:
+        return max(asof or observed_date, observed_date) if observed_date else None
+    return asof or observed_date
 
 
 def _exchange_symbol(symbol: str) -> str:
@@ -118,11 +140,21 @@ def refresh_fundamental_snapshots(
     """Refresh reports and valuation snapshots without making provider failures fatal."""
     stamp = _now()
     refreshed, report_rows, errors = 0, 0, []
+    valuation_dates = {}
     for symbol in dict.fromkeys(str(item) for item in symbols):
         try:
             reports = report_fetcher(symbol)
+            valid_reports = []
+            for row in reports:
+                report_date = _date(row.get("report_date"))
+                notice_date = _date(row.get("notice_date"))
+                if not report_date or not notice_date:
+                    errors.append({"symbol": symbol, "error": "invalid report or notice date"})
+                    continue
+                valid_reports.append({**row, "report_date": report_date,
+                                      "notice_date": notice_date})
             with closing(conn_factory()) as conn:
-                for row in reports:
+                for row in valid_reports:
                     columns = ["symbol", "report_date", "notice_date", "report_type", "source_code",
                                "observed_at", *REPORT_FIELD_MAP, "raw_json"]
                     values = [row.get(item) for item in columns]
@@ -134,7 +166,11 @@ def refresh_fundamental_snapshots(
                     )
                 if asof_date:
                     value = valuation_fetcher(symbol)
-                    value["asof_date"] = str(asof_date)
+                    available_date = valuation_availability_date(value)
+                    if not available_date:
+                        raise ValueError("valuation has no verifiable observation date")
+                    value["asof_date"] = available_date
+                    valuation_dates[symbol] = available_date
                     columns = ["symbol", "asof_date", "source_code", "observed_at", "market_cap",
                                "pe_ttm", "pe_dynamic", "pb", "roe_pct", "raw_json"]
                     values = [value.get(item) for item in columns]
@@ -146,13 +182,14 @@ def refresh_fundamental_snapshots(
                     )
                 conn.commit()
             refreshed += 1
-            report_rows += len(reports)
+            report_rows += len(valid_reports)
         except Exception as exc:
             errors.append({"symbol": symbol, "error": repr(exc)})
     return {
         "status": "SUCCESS_WITH_WARNINGS" if errors else "SUCCESS",
         "asof_date": asof_date, "symbols": len(symbols), "refreshed": refreshed,
         "report_rows": report_rows, "errors": errors, "updated_at": stamp,
+        "valuation_asof_by_symbol": valuation_dates,
     }
 
 
@@ -227,9 +264,13 @@ def fundamental_snapshot(timelines: dict, symbol: str, signal_date: str,
                          profile: str) -> dict:
     """Return only fundamentals that were publicly available by signal_date."""
     reports = [item for item in timelines.get("reports", {}).get(symbol, [])
-               if str(item.get("notice_date") or "") <= signal_date]
-    values = [item for item in timelines.get("valuations", {}).get(symbol, [])
-              if str(item.get("asof_date") or "") <= signal_date]
+               if _date(item.get("notice_date")) and _date(item.get("report_date"))
+               and _date(item["notice_date"]) <= signal_date]
+    values = [{**item, "asof_date": available_date}
+              for item in timelines.get("valuations", {}).get(symbol, [])
+              if _date(item.get("asof_date"))
+              and (available_date := valuation_availability_date(item))
+              and available_date <= signal_date]
     report = max(reports, key=lambda item: (
         str(item.get("report_date") or ""), str(item.get("notice_date") or "")
     )) if reports else None

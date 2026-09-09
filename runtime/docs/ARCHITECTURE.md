@@ -19,7 +19,9 @@ data_lake/
   backups/ logs/ outbox/       备份、日志、邮件发件箱
 ```
 
-SQLite 负责资产、点时行情、持仓、证据、研报、信号、策略、因子、回测和数据血缘。它也持久化 Harness 的线程、运行、事件、工具调用、人工审批、坏案例、评测与配置版本，以及投资授权书、策略演化候选、组合模拟和已批准策略版本。系统不包含事件图、Neo4j 镜像、通用 Agent Chat 或模型 API Key JSON 路由。
+SQLite 负责资产、点时行情、持仓、证据、研报、信号、策略、因子、回测和数据血缘。它也持久化 Harness 的线程、运行、事件、工具调用、人工审批、坏案例、评测与配置版本，以及投资授权书、策略演化候选、持续重试队列、组合模拟和已激活策略版本。系统不包含事件图、Neo4j 镜像、通用 Agent Chat 或模型 API Key JSON 路由。
+
+同一数据湖只允许一个 Web 服务持有 `cache/service.lock` 的操作系统文件锁；崩溃后锁由系统释放。`cache/service.json` 保存进程、端口、代码版本和令牌文件路径，不保存令牌内容。启动器复用匹配服务，只有显式 `-ReplaceService` 才替换已登记的旧版本；先绑定端口，再启动后台任务。邮件 outbox 每 30 秒独立检查到期任务，并通过数据库路径对应的跨进程锁防止并发重复派发；默认不外发的设置保持不变。
 
 ## 数据进入规则
 
@@ -56,7 +58,7 @@ SQLite 负责资产、点时行情、持仓、证据、研报、信号、策略�
 - `harness_approvals` 把候选晋级和版本回滚暂停为显式人工决策。
 - 旧的 `harness_bad_cases`、候选、评测和版本表继续承担反馈与配置演化，不再代表 Harness 的全部能力。
 - `investment_mandates` 冻结用户目标与硬风险约束；`strategy_evolution_candidates` 保存参数白名单内的每轮候选。
-- `strategy_simulations` 分开保存滚动验证和最终留出结果；`strategy_evolution_versions` 只接收三档风险门禁均通过且人工批准的实验。
+- `strategy_simulations` 分开保存滚动验证和最终留出结果；`strategy_evolution_retry_jobs` 记录跨交易日下一批参数与失败门禁；`strategy_evolution_versions` 只接收三档风险门禁全部通过并由系统身份自动签名的实验。
 
 `app.strategy_evolution` 使用前一交易日信号和下一交易日开盘成交，支持多标的持仓、换股、止损、固定或浮动止盈，以及组合回撤守卫。成交模型显式计入佣金最低收费、卖出印花税、滑点、100 股整手、成交量参与上限、停牌、涨跌停近似和 T+1。价格限制是授权书中的可审计假设，不冒充对不同板块和特殊证券规则的完整识别。
 

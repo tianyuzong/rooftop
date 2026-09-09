@@ -6,9 +6,13 @@ import json
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
+from pathlib import Path
 from typing import Callable
 
 from .db import connect
+from .process_lock import ProcessLock
+from .mail_settings import get_settings, public_settings, smtp_client
 
 
 def queue_alert(dedupe_key: str, subject: str, body: str, *, channel: str = "EMAIL",
@@ -30,11 +34,7 @@ def queue_alert(dedupe_key: str, subject: str, body: str, *, channel: str = "EMA
 
 
 def smtp_status() -> dict:
-    transport = ("ARGUS_SMTP_HOST", "ARGUS_SMTP_USER", "ARGUS_SMTP_PASSWORD")
-    return {"configured": all(os.environ.get(key) for key in transport),
-            "default_target_configured": bool(os.environ.get("ARGUS_ALERT_TO")),
-            "send_enabled": os.environ.get("ARGUS_EMAIL_SEND_ENABLED") == "1",
-            "default": "dry_run", "provider": "SMTP", "order_execution": False}
+    return public_settings()
 
 
 def _retry(conn, row, error: Exception | str) -> None:
@@ -50,41 +50,82 @@ def _retry(conn, row, error: Exception | str) -> None:
 
 
 def send_pending(limit: int = 20, conn_factory: Callable = connect) -> dict:
+    with closing(conn_factory()) as conn:
+        database_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    if not database_path:
+        raise ValueError("mail delivery requires a persistent outbox")
+    lock = ProcessLock(Path(database_path).with_suffix(".outbox.lock"))
+    if not lock.acquire():
+        return {"status": "BUSY", "sent": 0}
+    try:
+        return _send_pending_locked(limit, conn_factory)
+    finally:
+        lock.release()
+
+
+def _send_pending_locked(limit: int, conn_factory: Callable) -> dict:
     status = smtp_status()
     if not status["configured"] or not status["send_enabled"]:
         return {"status": "DRY_RUN", "sent": 0, **status}
+    settings = get_settings()
     now = datetime.now(timezone.utc).isoformat()
     with closing(conn_factory()) as conn:
+        conn.execute("""UPDATE alert_outbox SET status='CANCELLED',error='订阅已停用'
+            WHERE status IN ('PENDING','RETRY') AND subscription_id IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM signal_subscriptions s WHERE s.id=subscription_id AND s.enabled=1)""")
+        conn.commit()
         rows = conn.execute(
             """SELECT * FROM alert_outbox
                WHERE channel='EMAIL' AND status IN ('PENDING','RETRY')
                  AND (next_attempt_at IS NULL OR next_attempt_at<=?)
                ORDER BY id LIMIT ?""", (now, max(1, min(int(limit), 100))),
         ).fetchall()
+        if not rows:
+            return {"status": "NO_DELIVERY", "sent": 0, "processed": 0, **status}
         sent = 0
+        processed = set()
         try:
-            with smtplib.SMTP_SSL(os.environ["ARGUS_SMTP_HOST"], int(os.environ.get("ARGUS_SMTP_PORT", "465"))) as client:
-                client.login(os.environ["ARGUS_SMTP_USER"], os.environ["ARGUS_SMTP_PASSWORD"])
+            with smtp_client(smtplib, settings) as client:
+                client.login(settings['user'], settings['password'])
                 for row in rows:
-                    target = str(row["target"] or os.environ.get("ARGUS_ALERT_TO") or "").strip()
+                    current = conn.execute("""SELECT o.status,COALESCE(s.enabled,1) enabled
+                        FROM alert_outbox o LEFT JOIN signal_subscriptions s ON s.id=o.subscription_id
+                        WHERE o.id=?""", (row['id'],)).fetchone()
+                    if current['status'] not in ('PENDING','RETRY') or not current['enabled']:
+                        processed.add(row['id'])
+                        continue
+                    target = str(row["target"] or settings['default_target'] or "").strip()
                     if not target:
                         _retry(conn, row, "missing email target")
+                        conn.commit()
+                        processed.add(row["id"])
                         continue
                     message = EmailMessage()
-                    message["From"] = os.environ["ARGUS_SMTP_USER"]
+                    message["From"] = settings["user"]
                     message["To"] = target
                     message["Subject"] = row["subject"]
+                    message['Date'] = formatdate(localtime=False)
+                    message['Message-ID'] = make_msgid()
                     message.set_content(row["body"])
+                    metadata = json.loads(row['metadata_json'] or '{}')
+                    if metadata.get('html'):
+                        message.add_alternative(metadata['html'], subtype='html')
                     try:
-                        client.send_message(message)
+                        refused = client.send_message(message)
+                        if isinstance(refused, dict) and refused:
+                            raise smtplib.SMTPRecipientsRefused(refused)
                         conn.execute(
                             """UPDATE alert_outbox SET status='SENT',sent_at=?,attempts=attempts+1,
                                next_attempt_at=NULL,error=NULL WHERE id=?""",
                             (datetime.now(timezone.utc).isoformat(), row["id"]),
                         )
+                        if row['subscription_id']:
+                            conn.execute('UPDATE signal_subscriptions SET last_sent_at=? WHERE id=?', (datetime.now(timezone.utc).isoformat(),row['subscription_id']))
                         sent += 1
                     except Exception as exc:
-                        _retry(conn, row, exc)
+                        _retry(conn, row, str(exc).replace(settings['password'], '[已隐藏]'))
+                    conn.commit()
+                    processed.add(row["id"])
             conn.commit()
             retrying = sum(1 for row in rows if row["id"] not in {
                 item[0] for item in conn.execute(
@@ -96,10 +137,12 @@ def send_pending(limit: int = 20, conn_factory: Callable = connect) -> dict:
                     "processed": len(rows), "retrying_or_failed": retrying, **status}
         except Exception as exc:
             for row in rows:
-                _retry(conn, row, exc)
+                if row["id"] not in processed:
+                    _retry(conn, row, str(exc).replace(settings['password'], '[已隐藏]'))
             conn.commit()
-            return {"status": "FAILED", "sent": sent, "processed": len(rows),
-                    "error": repr(exc), **status}
+            return {"status": "SENT" if sent == len(rows) else "FAILED",
+                    "sent": sent, "processed": len(rows),
+                    "error": str(exc).replace(settings["password"], "[已隐藏]"), **status}
 
 
 def outbox_payload(limit: int = 50, conn_factory: Callable = connect) -> dict:
@@ -118,3 +161,23 @@ def outbox_payload(limit: int = 50, conn_factory: Callable = connect) -> dict:
             row["metadata"] = {}
     return {"rows": rows, "counts": counts, "smtp": smtp_status(),
             "research_only": True, "order_execution": False}
+
+
+def confirm_received(message_id: int, conn_factory: Callable = connect) -> dict:
+    with closing(conn_factory()) as conn:
+        cursor = conn.execute("UPDATE alert_outbox SET received_at=? WHERE id=? AND status='SENT'", (datetime.now(timezone.utc).isoformat(), int(message_id)))
+        if cursor.rowcount != 1:
+            raise ValueError('只能确认已由发信服务器接受的邮件')
+        conn.commit()
+    return {'id':int(message_id), 'status':'RECEIVED'}
+
+
+def retry_message(message_id: int, conn_factory: Callable = connect) -> dict:
+    with closing(conn_factory()) as conn:
+        cursor = conn.execute("""UPDATE alert_outbox SET status='PENDING',attempts=0,next_attempt_at=NULL,error=NULL
+            WHERE id=? AND status IN ('FAILED','RETRY') AND (subscription_id IS NULL OR
+            EXISTS(SELECT 1 FROM signal_subscriptions s WHERE s.id=subscription_id AND s.enabled=1))""", (int(message_id),))
+        if cursor.rowcount != 1:
+            raise ValueError('这封邮件无需重试，或其订阅已经停用')
+        conn.commit()
+    return send_pending(conn_factory=conn_factory)

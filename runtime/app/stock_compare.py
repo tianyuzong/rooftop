@@ -279,6 +279,7 @@ def _fundamentals(symbol: str) -> dict:
 
 
 def _load_bars(symbol: str) -> list[dict]:
+    from .market_quality import contiguous_daily_window
     source_filter = (" AND d2.code IN ('tdx_local','tdx_public')"
                      if market_provider_mode() == "tdx" else "")
     with closing(connect()) as conn:
@@ -293,7 +294,7 @@ def _load_bars(symbol: str) -> list[dict]:
                  ORDER BY m2.captured_at DESC LIMIT 1)
                ORDER BY trade_date""", (symbol, symbol),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return contiguous_daily_window([dict(row) for row in rows])[0]
 
 
 def _latest_quote(symbol: str) -> dict | None:

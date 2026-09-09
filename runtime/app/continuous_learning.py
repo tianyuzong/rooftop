@@ -454,6 +454,7 @@ def _refresh_market_data_isolated(symbols: Iterable[str], include_minutes: bool)
 
 
 def _load_bars(symbols: Iterable[str]) -> dict[str, list[dict]]:
+    from .market_quality import contiguous_daily_window
     initialize()
     symbols = list(dict.fromkeys(symbols))
     if not symbols:
@@ -476,7 +477,7 @@ def _load_bars(symbols: Iterable[str]) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         result[str(row["asset_symbol"])].append(dict(row))
-    return dict(result)
+    return {symbol: contiguous_daily_window(bars)[0] for symbol, bars in result.items()}
 
 
 def _load_sentiment(symbols: Iterable[str]) -> dict[tuple[str, str], float]:
@@ -498,8 +499,10 @@ def _mean(values: list[float]) -> float:
 
 
 def _features_at(bars: list[dict], index: int, sentiment: float, market_mom: float) -> dict[str, float]:
-    closes = [float(item["close"]) for item in bars]
-    volumes = [float(item["volume"] or 0.0) for item in bars]
+    window = bars[max(0, index - 20):index + 1]
+    index = len(window) - 1
+    closes = [float(item["close"]) for item in window]
+    volumes = [float(item["volume"] or 0.0) for item in window]
     returns = [closes[pos] / closes[pos - 1] - 1.0 for pos in range(index - 19, index + 1)]
     volume_window = volumes[index - 19:index + 1]
     volume_mean = _mean(volume_window)
@@ -552,23 +555,29 @@ def build_online_probability_map(symbols: Iterable[str]) -> dict[str, dict[str, 
         grouped[sample["target_date"]].append(sample)
     weights = dict(INITIAL_COEFFICIENTS)
     probability_map: dict[str, dict[str, float]] = defaultdict(dict)
-    update_count = 0
     for target_date in sorted(grouped):
         batch = grouped[target_date]
         for sample in batch:
             probability, _ = _prediction(weights, sample["features"])
             probability_map[sample["symbol"]][sample["signal_date"]] = probability
-        for sample in batch:
-            probability, _ = _prediction(weights, sample["features"])
-            error = float(sample["actual_return"] > 0) - probability
-            rate = 0.05 / math.sqrt(1.0 + update_count / 200.0)
-            for name in FEATURE_NAMES:
-                regularization = 0.0005 * weights.get(name, 0.0) if name != "bias" else 0.0
-                weights[name] += rate * (
-                    error * sample["features"][name] - regularization
-                )
-            update_count += 1
+        _update_online_weights(weights, batch)
     return {symbol: dict(values) for symbol, values in probability_map.items()}
+
+
+def _update_online_weights(weights: dict[str, float], batch: list[dict]) -> None:
+    """One daily gradient step, independent of stock ordering and universe size."""
+    if not batch:
+        return
+    gradient = {name: 0.0 for name in FEATURE_NAMES}
+    for sample in batch:
+        probability, _ = _prediction(weights, sample["features"])
+        error = float(sample["actual_return"] > 0) - probability
+        for name in FEATURE_NAMES:
+            gradient[name] += error * float(sample["features"][name]) / len(batch)
+    for name in FEATURE_NAMES:
+        regularization = 0.0005 * weights.get(name, 0.0) if name != "bias" else 0.0
+        weights[name] = _clamp(weights.get(name, 0.0) + 0.05 *
+                               (gradient[name] - regularization), -5.0, 5.0)
 
 
 def latest_symbol_scores(symbols: Iterable[str], data_asof: str | None = None,
@@ -715,26 +724,47 @@ def _ensure_active_model() -> dict:
 
 def run_six_month_walk_forward(symbols: Iterable[str], cycle_id: int | None = None,
                                auto_promote: bool = True, max_drawdown: float = 0.15) -> dict:
+    symbols = list(dict.fromkeys(symbols))
     active = _ensure_active_model()
-    with closing(connect()) as conn:
-        baseline_row = conn.execute(
-            "SELECT version_key,coefficients_json FROM prediction_model_versions "
-            "WHERE version_key='prediction-baseline-v1'"
-        ).fetchone()
-    baseline_version = str(baseline_row["version_key"]) if baseline_row else active["version_key"]
-    baseline_weights = {
-        key: float(value) for key, value in
-        _load(baseline_row["coefficients_json"], INITIAL_COEFFICIENTS).items()
-    } if baseline_row else dict(INITIAL_COEFFICIENTS)
+    baseline_version = active["version_key"]
+    baseline_weights = dict(active["coefficients"])
     samples = build_walk_forward_samples(symbols)
-    dates = sorted({item["target_date"] for item in samples})[-126:]
+    complete_asof = _latest_data_date(symbols)
+    samples = [item for item in samples if complete_asof and item["target_date"] <= complete_asof]
+    previous_end = str(active.get("training_end") or "")
+    previous_metrics = _load(active.get("metrics_json"), {})
+    incremental = bool(previous_end)
+    # The incumbent has already seen its training window. Comparing it on that
+    # window would leak labels; daily updates use only subsequently realized days.
+    dates = sorted({item["target_date"] for item in samples
+                    if not previous_end or item["target_date"] > previous_end})
+    if not incremental:
+        dates = dates[-126:]
+    if incremental and not dates:
+        unchanged_gate = {**_load(active.get("gate_json"), {}),
+                          "new_data_available": False, "evaluation_reused": True}
+        with closing(connect()) as conn:
+            cursor = conn.execute(
+                """INSERT INTO prediction_evaluations
+                   (cycle_id,baseline_version,candidate_version,eval_start,eval_end,sample_count,
+                    baseline_metrics_json,candidate_metrics_json,gate_json,status,created_at)
+                   VALUES(?,?,?,?,?,0,?,?,?,'UNCHANGED',?)""",
+                (cycle_id, baseline_version, baseline_version, previous_end, previous_end,
+                 _dump(previous_metrics), _dump(previous_metrics),
+                 _dump(unchanged_gate), _now()),
+            )
+            conn.commit()
+        return {"evaluation_id": cursor.lastrowid, "baseline_version": baseline_version,
+                "candidate_version": baseline_version, "status": "UNCHANGED",
+                "gate": unchanged_gate,
+                "baseline_metrics": previous_metrics, "candidate_metrics": previous_metrics,
+                "training_start": active.get("training_start"), "training_end": previous_end}
     selected = [item for item in samples if item["target_date"] in set(dates)]
     candidate_weights = dict(baseline_weights)
     baseline_points, candidate_points = [], []
     grouped: dict[str, list[dict]] = defaultdict(list)
     for sample in selected:
         grouped[sample["target_date"]].append(sample)
-    update_count = 0
     for target_date in sorted(grouped):
         batch = grouped[target_date]
         for sample in batch:
@@ -742,17 +772,14 @@ def run_six_month_walk_forward(symbols: Iterable[str], cycle_id: int | None = No
             cp, cr = _prediction(candidate_weights, sample["features"])
             baseline_points.append(_point(sample, bp, br))
             candidate_points.append(_point(sample, cp, cr))
-        for sample in batch:
-            probability, _ = _prediction(candidate_weights, sample["features"])
-            error = float(sample["actual_return"] > 0) - probability
-            rate = 0.05 / math.sqrt(1.0 + update_count / 200.0)
-            for name in FEATURE_NAMES:
-                regularization = 0.0005 * candidate_weights.get(name, 0.0) if name != "bias" else 0.0
-                candidate_weights[name] += rate * (error * sample["features"][name] - regularization)
-            update_count += 1
+        _update_online_weights(candidate_weights, batch)
     baseline_metrics = _evaluate_points(baseline_points)
     candidate_metrics = _evaluate_points(candidate_points)
-    enough = candidate_metrics["sample_count"] >= max(60, len(set(selected_item["symbol"] for selected_item in selected)) * 20)
+    prior_samples = int(previous_metrics.get("training_sample_count",
+                                            previous_metrics.get("sample_count", 0)))
+    training_samples = (prior_samples if incremental else 0) + len(selected)
+    enough = bool(selected) and training_samples >= max(
+        60, len({item["symbol"] for item in selected}) * 20)
     non_regression = (
         candidate_metrics["directional_accuracy"] >= baseline_metrics["directional_accuracy"] - 0.005
         and candidate_metrics["brier_score"] <= baseline_metrics["brier_score"] + 0.002
@@ -763,13 +790,21 @@ def run_six_month_walk_forward(symbols: Iterable[str], cycle_id: int | None = No
         or candidate_metrics["sharpe"] >= baseline_metrics["sharpe"] + 0.10
     )
     risk_pass = candidate_metrics["max_drawdown"] <= float(max_drawdown)
-    eligible = enough and non_regression and improvement and risk_pass
+    eligible = enough and non_regression and risk_pass and (incremental or improvement)
     stamp = _now()
     version_key = f"prediction-{datetime.now(SHANGHAI).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     gate = {"enough_samples": enough, "non_regression": non_regression,
             "measurable_improvement": improvement, "max_drawdown_pass": risk_pass,
+            "daily_learning_update": incremental,
+            "comparison_version": baseline_version,
+            "comparison_after_training_end": previous_end or None,
+            "evaluation_scope": "incremental_forward" if incremental else "cold_start_prequential",
+            "evaluation_trading_days": len(dates), "evaluation_sample_count": len(selected),
+            "training_sample_count": training_samples,
             "thresholds": {"window_trading_days": 126, "max_drawdown": max_drawdown,
                            "accuracy_tolerance": 0.005, "brier_tolerance": 0.002}}
+    candidate_metrics["training_sample_count"] = training_samples
+    candidate_metrics["evaluation_scope"] = gate["evaluation_scope"]
     same_weights = all(abs(candidate_weights.get(name, 0.0) -
                            float(active["coefficients"].get(name, 0.0))) <= 1e-12
                        for name in FEATURE_NAMES)
@@ -780,12 +815,12 @@ def run_six_month_walk_forward(symbols: Iterable[str], cycle_id: int | None = No
                ("CANDIDATE" if eligible else "REJECTED")))
     candidate_version = active["version_key"] if unchanged else version_key
     with closing(connect()) as conn:
-        if unchanged:
-            conn.execute(
-                """UPDATE prediction_model_versions SET metrics_json=?,gate_json=?
-                   WHERE version_key=?""",
-                (_dump(candidate_metrics), _dump(gate), active["version_key"]),
-            )
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(
+            "SELECT version_key FROM prediction_model_versions WHERE status='ACTIVE' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not current or current[0] != baseline_version:
+            raise RuntimeError("active prediction model changed during evaluation; retry from its new checkpoint")
         if status == "ACTIVE":
             conn.execute("UPDATE prediction_model_versions SET status='ARCHIVED' WHERE status='ACTIVE'")
         if not unchanged:
@@ -795,9 +830,11 @@ def run_six_month_walk_forward(symbols: Iterable[str], cycle_id: int | None = No
                     training_start,training_end,metrics_json,gate_json,reason,created_at,activated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (version_key, active["version_key"], status, _dump(list(FEATURE_NAMES)),
-                 _dump(candidate_weights), dates[0] if dates else None, dates[-1] if dates else None,
+                 _dump(candidate_weights), (active.get("training_start") or dates[0]) if dates else None,
+                 dates[-1] if dates else None,
                  _dump(candidate_metrics), _dump(gate),
-                 "六个月逐日滚动样本外评估" if eligible else "未通过六个月样本外晋级门禁",
+                 ("逐日增量学习；与当前活动模型比较新增已实现样本" if incremental else
+                  "冷启动逐日样本外评估") if eligible else "未通过当前模型非退化或风险门禁",
                  stamp, stamp if status == "ACTIVE" else None),
             )
         cursor = conn.execute(
@@ -918,17 +955,72 @@ def create_daily_predictions(symbols: Iterable[str], phase: str, cycle_id: int,
             "target_date": target_date.isoformat(), "count": len(created), "predictions": created}
 
 
-def _latest_data_date(symbols: Iterable[str]) -> str | None:
-    symbols = list(symbols)
+def market_data_coverage(symbols: Iterable[str], required_date: str | None = None) -> dict:
+    symbols = list(dict.fromkeys(symbols))
     if not symbols:
-        return None
+        return {"complete": False, "data_asof": None, "missing_symbols": [],
+                "stale_symbols": [], "latest_by_symbol": {}}
     placeholders = ",".join("?" for _ in symbols)
     with closing(connect()) as conn:
-        row = conn.execute(
-            f"SELECT MAX(trade_date) FROM market_daily_bars WHERE asset_symbol IN ({placeholders})",
+        rows = conn.execute(
+            f"""SELECT b.asset_symbol,MAX(b.trade_date) AS latest
+                FROM market_daily_bars b JOIN data_sources s ON s.id=b.source_id
+                WHERE b.asset_symbol IN ({placeholders}) AND b.adjust_mode='qfq'
+                  AND s.code IN ('tdx_local','tdx_public')
+                GROUP BY b.asset_symbol""",
             symbols,
-        ).fetchone()
-    return str(row[0]) if row and row[0] else None
+        ).fetchall()
+    latest = {str(row["asset_symbol"]): str(row["latest"]) for row in rows if row["latest"]}
+    missing = [symbol for symbol in symbols if symbol not in latest]
+    stale = [symbol for symbol in symbols if required_date and
+             symbol in latest and latest[symbol] < required_date]
+    return {"complete": not missing and not stale,
+            "data_asof": min(latest.values()) if latest and not missing else None,
+            "missing_symbols": missing, "stale_symbols": stale,
+            "latest_by_symbol": latest, "required_date": required_date}
+
+
+def _latest_data_date(symbols: Iterable[str]) -> str | None:
+    return market_data_coverage(symbols)["data_asof"]
+
+
+def market_close_coverage(symbols: Iterable[str], required_date: str) -> dict:
+    symbols = list(dict.fromkeys(symbols))
+    daily = market_data_coverage(symbols, required_date)
+    expected_minutes = set(range(9 * 60 + 31, 11 * 60 + 31)) | set(range(13 * 60 + 1, 15 * 60 + 1))
+    observed = {symbol: set() for symbol in symbols}
+    end_date = (date.fromisoformat(required_date) + timedelta(days=1)).isoformat()
+    if symbols:
+        with closing(connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT m.asset_symbol,m.bar_time FROM minute_bars m
+                    JOIN data_sources s ON s.id=m.source_id
+                    WHERE m.asset_symbol IN ({','.join('?' for _ in symbols)})
+                      AND m.interval_minutes=1 AND m.bar_time>=? AND m.bar_time<?
+                      AND s.code IN ('tdx_local','tdx_public')""",
+                [*symbols, required_date, end_date],
+            ).fetchall()
+        for row in rows:
+            try:
+                stamp = datetime.fromisoformat(row["bar_time"])
+                local = stamp.astimezone(SHANGHAI) if stamp.tzinfo else stamp.replace(tzinfo=SHANGHAI)
+            except (TypeError, ValueError):
+                continue
+            if local.date().isoformat() == required_date and local.second == 0:
+                observed[row["asset_symbol"]].add(local.hour * 60 + local.minute)
+    missing = [symbol for symbol, minutes in observed.items() if not expected_minutes <= minutes]
+    return {"complete": daily["complete"] and not missing, "daily": daily,
+            "missing_minute_symbols": missing,
+            "minute_counts": {symbol: len(minutes & expected_minutes) for symbol, minutes in observed.items()}}
+
+
+def _cycle_needs_retry(row) -> bool:
+    if not row:
+        return True
+    metrics = _load(row["metrics_json"], {})
+    return (row["status"] not in {"SUCCESS", "SUCCESS_WITH_WARNINGS"}
+            or bool(metrics.get("retry_required"))
+            or bool(metrics.get("quant_portfolios", {}).get("errors")))
 
 
 def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
@@ -949,6 +1041,8 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
     worker_token = uuid.uuid4().hex
     stage_keys = _cycle_stage_keys(phase, inputs)
     progress = _initial_cycle_progress(stage_keys)
+    previous_metrics = {}
+    retry_quant_keys = None
     with closing(connect()) as conn:
         conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
@@ -957,7 +1051,7 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
         retry_stale = bool(inputs.get("retry_if_stale")) and phase == "POST_CLOSE"
         stale_success = bool(existing and retry_stale and
                              str(existing["data_asof"] or "") < cycle_date.isoformat())
-        if existing and existing["status"] == "SUCCESS" and not stale_success:
+        if existing and not _cycle_needs_retry(existing) and not stale_success:
             return {"cycle_key": cycle_key, "status": "ALREADY_COMPLETED",
                     "metrics": _load(existing["metrics_json"], {}),
                     "progress": _load(existing["progress_json"], {})}
@@ -975,6 +1069,27 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
                     "progress": _load(existing["progress_json"], {}),
                     "heartbeat_at": existing["heartbeat_at"],
                 }
+        if existing:
+            frozen_symbols = _load(existing["universe_json"], [])
+            if frozen_symbols:
+                if inputs.get("symbols") and set(symbols) != set(frozen_symbols):
+                    raise ValueError("cycle universe is frozen; use BACKFILL for a different stock pool")
+                symbols = frozen_symbols
+        if existing and str(existing["data_asof"] or "") >= cycle_date.isoformat():
+            previous_metrics = _load(existing["metrics_json"], {})
+            previous_quant = previous_metrics.get("quant_portfolios", {})
+            if previous_quant.get("errors"):
+                retry_quant_keys = [item["mandate_key"] for item in previous_quant["errors"]]
+            for stage, flag in (("calendar", "refresh_calendar"),
+                                ("fundamentals", "refresh_fundamentals"),
+                                ("deep_learning", "train_deep_model"),
+                                ("intraday_evolution", "evolve_intraday"),
+                                ("code_evolution", "evolve_source_code")):
+                result = previous_metrics.get(stage) or {}
+                if result.get("status") in {"SUCCESS", "REFRESHED", "ACTIVE", "UNCHANGED", "REJECTED"}:
+                    inputs[flag] = False
+            stage_keys = _cycle_stage_keys(phase, inputs)
+            progress = _initial_cycle_progress(stage_keys)
         conn.execute(
             """INSERT INTO harness_learning_cycles
                (cycle_key,cycle_date,phase,status,trigger_kind,universe_json,
@@ -991,11 +1106,12 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
         conn.commit()
         row = conn.execute("SELECT id FROM harness_learning_cycles WHERE cycle_key=?", (cycle_key,)).fetchone()
         cycle_id = int(row[0])
-    errors, market_result = [], None
+    errors = []
+    market_result = previous_metrics.get("market_refresh")
     tracker = _CycleProgress(cycle_id, worker_token, progress)
     tracker.start_heartbeat()
     try:
-        calendar_result = {"status": "SKIPPED"}
+        calendar_result = previous_metrics.get("calendar", {"status": "SKIPPED"})
         if "calendar" in stage_keys:
             tracker.start("calendar")
             calendar_result = refresh_trading_calendar()
@@ -1003,10 +1119,16 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
         if "market_refresh" in stage_keys:
             tracker.start("market_refresh")
             try:
-                market_result = _refresh_market_data_isolated(
-                    symbols, include_minutes=phase in {"PRE_OPEN", "POST_CLOSE"})
+                cached_close = (market_close_coverage(symbols, cycle_date.isoformat())
+                                if previous_metrics and phase == "POST_CLOSE" else {})
+                if cached_close.get("complete"):
+                    market_result = {"status": "CACHED_COMPLETE", "data_asof": cycle_date.isoformat(),
+                                     "coverage": cached_close, "errors": []}
+                else:
+                    market_result = _refresh_market_data_isolated(
+                        symbols, include_minutes=phase in {"PRE_OPEN", "POST_CLOSE"})
                 market_errors = market_result.get("errors", [])
-                errors.extend(market_errors)
+                errors.extend({"stage": "market_refresh", **item} for item in market_errors)
                 tracker.finish(
                     "market_refresh",
                     "WARNING" if market_errors else "SUCCEEDED",
@@ -1015,7 +1137,7 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
             except Exception as exc:
                 errors.append({"stage": "market_refresh", "error": repr(exc)})
                 tracker.finish("market_refresh", "WARNING", repr(exc))
-        fundamental_result = {"status": "SKIPPED", "errors": []}
+        fundamental_result = previous_metrics.get("fundamentals", {"status": "SKIPPED", "errors": []})
         if "fundamentals" in stage_keys:
             tracker.start("fundamentals")
             try:
@@ -1055,6 +1177,14 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
             "settle_predictions",
             detail=f"在线 {scored.get('scored', 0)} · 深度 {deep_scored.get('scored', 0)}",
         )
+        if phase == "POST_CLOSE":
+            coverage = market_data_coverage(symbols, cycle_date.isoformat())
+            if not coverage["complete"]:
+                unavailable = coverage["missing_symbols"] + coverage["stale_symbols"]
+                errors.append({"stage": "data_freshness", **coverage})
+                raise RuntimeError(
+                    f"盘后数据未完整覆盖 {cycle_date.isoformat()}：{','.join(unavailable)}"
+                )
         tracker.start("online_model")
         evaluation = run_six_month_walk_forward(
             symbols, cycle_id, bool(inputs.get("auto_promote", True)),
@@ -1080,9 +1210,9 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
         tracker.start("next_predictions")
         predictions = create_daily_predictions(symbols, phase, cycle_id, cycle_date, target)
         tracker.finish("next_predictions", detail=f"预测 {predictions.get('count', 0)} 条")
-        deep_result = {"status": "SKIPPED", "reason": "not_post_close"}
-        intraday_result = {"status": "SKIPPED", "reason": "not_post_close"}
-        code_result = {"status": "SKIPPED", "reason": "not_post_close"}
+        deep_result = previous_metrics.get("deep_learning", {"status": "SKIPPED", "reason": "not_post_close"})
+        intraday_result = previous_metrics.get("intraday_evolution", {"status": "SKIPPED", "reason": "not_post_close"})
+        code_result = previous_metrics.get("code_evolution", {"status": "SKIPPED", "reason": "not_post_close"})
         if "deep_learning" in stage_keys:
             tracker.start("deep_learning")
             try:
@@ -1129,9 +1259,23 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
             tracker.start("quant_portfolios")
             from .quant_portfolio import refresh_active_quant_portfolios
             quant_refresh = refresh_active_quant_portfolios(
-                learning_cycle_id=cycle_id, trigger_kind="daily_post_close"
+                learning_cycle_id=cycle_id, trigger_kind="daily_post_close",
+                only_mandate_keys=retry_quant_keys,
             )
-            tracker.finish("quant_portfolios", detail=str(quant_refresh.get("status", "完成")))
+            if retry_quant_keys is not None:
+                prior_results = previous_metrics.get("quant_portfolios", {}).get("results", [])
+                merged = {item["mandate_key"]: item for item in prior_results}
+                merged.update({item["mandate_key"]: item for item in quant_refresh["results"]})
+                quant_refresh["results"] = list(merged.values())
+                quant_refresh["updated"] = len(merged)
+                quant_refresh["mandates"] = len(merged) + len(quant_refresh["errors"])
+            errors.extend({"stage": "quant_portfolios", **item}
+                          for item in quant_refresh.get("errors", []))
+            tracker.finish("quant_portfolios",
+                           "FAILED" if quant_refresh.get("errors") else "SUCCEEDED",
+                           f"完成 {quant_refresh.get('updated', 0)}/{quant_refresh.get('mandates', 0)}")
+        retry_required = any(item.get("stage") != "sentiment" for item in errors)
+        cycle_status = "PARTIAL" if retry_required else ("SUCCESS_WITH_WARNINGS" if errors else "SUCCESS")
         metrics = {"calendar": calendar_result, "market_refresh": market_result,
                    "fundamentals": fundamental_result,
                    "sentiment": sentiment_result,
@@ -1142,24 +1286,25 @@ def run_continuous_learning_cycle(inputs: dict | None = None) -> dict:
                    "quant_portfolios": quant_refresh,
                    "data_asof": data_asof, "market_date_complete": market_date_complete,
                    "universe_count": len(symbols),
+                   "retry_required": retry_required,
                    "research_only": True, "order_execution": False}
         tracker.finalize(
-            "SUCCESS_WITH_WARNINGS" if errors else "SUCCESS",
+            cycle_status,
             f"本轮完成 · 警告 {len(errors)}",
         )
         with closing(connect()) as conn:
             updated = conn.execute(
-                """UPDATE harness_learning_cycles SET status='SUCCESS',data_asof=?,metrics_json=?,
+                """UPDATE harness_learning_cycles SET status=?,data_asof=?,metrics_json=?,
                    errors_json=?,heartbeat_at=?,worker_token=NULL,finished_at=?
                    WHERE id=? AND worker_token=?""",
-                (data_asof, _dump(metrics), _dump(errors), _now(), _now(), cycle_id,
+                (cycle_status, data_asof, _dump(metrics), _dump(errors), _now(), _now(), cycle_id,
                  worker_token),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("continuous learning cycle lease was lost")
             conn.commit()
         return {"cycle_id": cycle_id, "cycle_key": cycle_key, "phase": phase,
-                "status": "SUCCESS", "metrics": metrics, "errors": errors,
+                "status": cycle_status, "metrics": metrics, "errors": errors,
                 "progress": tracker.progress}
     except Exception as exc:
         errors.append({"stage": "cycle", "error": repr(exc)})
@@ -1207,7 +1352,7 @@ def continuous_learning_payload() -> dict:
         cycle_item["universe"] = _load(cycle_item.pop("universe_json"), [])
         progress = _load(cycle_item.pop("progress_json"), {})
         if not progress:
-            finished = cycle_item["status"] in {"SUCCESS", "FAILED"}
+            finished = cycle_item["status"] in {"SUCCESS", "SUCCESS_WITH_WARNINGS", "PARTIAL", "FAILED"}
             progress = {
                 "status": cycle_item["status"],
                 "current_stage": None,
@@ -1254,31 +1399,38 @@ def scheduled_cycle_request(now: datetime | None = None) -> dict | None:
     with closing(connect()) as conn:
         last_post_data = conn.execute(
             """SELECT MAX(data_asof) FROM harness_learning_cycles
-               WHERE phase='POST_CLOSE' AND status='SUCCESS'"""
+               WHERE phase='POST_CLOSE' AND status IN ('SUCCESS','SUCCESS_WITH_WARNINGS')"""
         ).fetchone()[0]
         today_pre = conn.execute(
-            """SELECT 1 FROM harness_learning_cycles WHERE cycle_key=? AND status='SUCCESS'""",
+            """SELECT 1 FROM harness_learning_cycles WHERE cycle_key=?
+               AND status IN ('SUCCESS','SUCCESS_WITH_WARNINGS')""",
             (f"continuous-pre_open-{current.date().isoformat()}",),
         ).fetchone()
         today_post = conn.execute(
-            """SELECT status,data_asof,finished_at FROM harness_learning_cycles
+            """SELECT * FROM harness_learning_cycles
                WHERE cycle_key=?""",
             (f"continuous-post_close-{current.date().isoformat()}",),
         ).fetchone()
         catchup_cycle = (conn.execute(
-            """SELECT status,heartbeat_at,started_at FROM harness_learning_cycles
+            """SELECT * FROM harness_learning_cycles
                WHERE cycle_key=?""", (catchup_key,),
         ).fetchone() if catchup_key else None)
     catchup_running = False
     if catchup_cycle and catchup_cycle["status"] == "RUNNING":
-        heartbeat_age = _timestamp_age_seconds(catchup_cycle["heartbeat_at"])
-        started_age = _timestamp_age_seconds(catchup_cycle["started_at"])
+        heartbeat_age = _timestamp_age_seconds(catchup_cycle["heartbeat_at"], current)
+        started_age = _timestamp_age_seconds(catchup_cycle["started_at"], current)
         lease_age = heartbeat_age if heartbeat_age is not None else started_age
         lease_timeout = (CYCLE_LEASE_TIMEOUT_SECONDS if heartbeat_age is not None
                          else int(timedelta(hours=2).total_seconds()))
         catchup_running = lease_age is None or lease_age < lease_timeout
-    if (latest and (not last_post_data or str(latest) > str(last_post_data)) and
-            current.time().hour < 9 and not catchup_running):
+    retry_minutes = max(5, int(os.environ.get("ARGUS_POST_CLOSE_RETRY_MINUTES", "30")))
+    catchup_age = (_timestamp_age_seconds(catchup_cycle["finished_at"], current)
+                   if catchup_cycle and catchup_cycle["finished_at"] else None)
+    catchup_due = catchup_age is None or catchup_age >= retry_minutes * 60
+    if (latest and (not last_post_data or str(latest) > str(last_post_data)
+                    or (catchup_cycle and _cycle_needs_retry(catchup_cycle))) and
+            (current.hour < 9 or str(latest) < current.date().isoformat()) and
+            not catchup_running and catchup_due):
         return {"phase": "POST_CLOSE", "cycle_date": latest, "trigger_kind": "scheduler_catchup",
                 "stock_limit": len(symbols), "auto_promote": True,
                 "retry_if_stale": True}
@@ -1287,14 +1439,13 @@ def scheduled_cycle_request(now: datetime | None = None) -> dict | None:
         return {"phase": "PRE_OPEN", "cycle_date": current.date().isoformat(),
                 "trigger_kind": "scheduler", "stock_limit": len(symbols), "auto_promote": True}
     post_complete = bool(
-        today_post and today_post["status"] == "SUCCESS" and today_post["data_asof"] and
+        today_post and not _cycle_needs_retry(today_post) and today_post["data_asof"] and
         str(today_post["data_asof"]) >= current.date().isoformat()
     )
-    retry_minutes = max(5, int(os.environ.get("ARGUS_POST_CLOSE_RETRY_MINUTES", "30")))
-    retry_age = (_timestamp_age_seconds(today_post["finished_at"])
+    retry_age = (_timestamp_age_seconds(today_post["finished_at"], current)
                  if today_post and today_post["finished_at"] else None)
     retry_due = not today_post or retry_age is None or retry_age >= retry_minutes * 60
-    if (is_trading_day(current.date()) and minutes >= 15 * 60 + 10 and
+    if (is_trading_day(current.date()) and minutes >= 18 * 60 and
             not post_complete and retry_due):
         return {"phase": "POST_CLOSE", "cycle_date": current.date().isoformat(),
                 "trigger_kind": "scheduler", "stock_limit": len(symbols),

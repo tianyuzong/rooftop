@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
 from contextlib import closing
 from datetime import datetime, timezone
@@ -325,35 +326,49 @@ def create_subscription(payload: dict, conn_factory: Callable = connect) -> dict
     if channel != "EMAIL":
         raise ValueError("MVP 当前只支持 EMAIL；飞书和微信保留为后续适配器")
     target = str(payload.get("target") or "").strip() or None
-    if target and ("@" not in target or len(target) > 254):
+    if target and (not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', target) or len(target) > 254):
         raise ValueError("邮件地址格式无效")
     mandate_id = payload.get("mandate_id")
-    kinds = payload.get("event_kinds") or sorted(ACTIONABLE)
+    kinds = payload.get("event_kinds", sorted(ACTIONABLE))
     if not isinstance(kinds, list) or not set(kinds).issubset(SIGNAL_ACTIONS):
         raise ValueError("订阅事件类型无效")
     minimum = float(payload.get("minimum_confidence", 0) or 0)
     if not 0 <= minimum <= 1:
         raise ValueError("最低置信度必须在 0 到 1 之间")
+    from .email_digest import normalize_selection
+    digest_kinds, watch_symbols, send_time = normalize_selection(payload, conn_factory)
+    if not kinds and not digest_kinds:
+        raise ValueError('请选择至少一种订阅内容')
     stamp = _now()
     with closing(conn_factory()) as conn:
         if mandate_id is not None and not conn.execute(
             "SELECT 1 FROM quant_mandates WHERE id=?", (int(mandate_id),)
         ).fetchone():
             raise ValueError("订阅对应的投资约束不存在")
-        cursor = conn.execute(
-            """INSERT INTO signal_subscriptions
-               (name,mandate_id,channel,target,enabled,event_kinds_json,
-                minimum_confidence,created_at,updated_at)
-               VALUES(?,?,?,?,1,?,?,?,?)""",
-            (str(payload.get("name") or "Rooftop 邮件提醒").strip()[:100],
-             int(mandate_id) if mandate_id is not None else None, channel, target,
-             _dump(sorted(set(kinds))), minimum, stamp, stamp),
-        )
+        name = str(payload.get('name') or '我的投资日报').strip()[:100]
+        subscription_id = payload.get('id')
+        if subscription_id is None:
+            existing = conn.execute('SELECT id FROM signal_subscriptions WHERE target IS ? AND name=? ORDER BY id DESC LIMIT 1', (target, name)).fetchone()
+            subscription_id = existing[0] if existing else None
+        values = (name, int(mandate_id) if mandate_id is not None else None, channel, target,
+                  _dump(sorted(set(kinds))), minimum, _dump(digest_kinds), _dump(watch_symbols), send_time, stamp)
+        if subscription_id is not None:
+            cursor = conn.execute("""UPDATE signal_subscriptions SET name=?,mandate_id=?,channel=?,target=?,
+                event_kinds_json=?,minimum_confidence=?,digest_kinds_json=?,watch_symbols_json=?,send_time=?,
+                updated_at=? WHERE id=?""", (*values, int(subscription_id)))
+            if cursor.rowcount != 1:
+                raise ValueError('订阅不存在')
+            # Queued content belongs to the old selection/recipient; do not send it after editing.
+            conn.execute("UPDATE alert_outbox SET status='CANCELLED',error='订阅内容已更新' WHERE subscription_id=? AND status IN ('PENDING','RETRY')", (int(subscription_id),))
+        else:
+            cursor = conn.execute("""INSERT INTO signal_subscriptions
+                (name,mandate_id,channel,target,event_kinds_json,minimum_confidence,digest_kinds_json,
+                 watch_symbols_json,send_time,updated_at,created_at,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""", (*values,stamp))
+            subscription_id = int(cursor.lastrowid)
         conn.commit()
-        subscription_id = int(cursor.lastrowid)
-    return {"id": subscription_id, "status": "ACTIVE", "channel": channel,
-            "target": target, "event_kinds": sorted(set(kinds)),
-            "minimum_confidence": minimum, "order_execution": False}
+    return {'id':int(subscription_id), 'status':'SAVED', 'channel':channel, 'target':target,
+            'event_kinds': sorted(set(kinds)), 'digest_kinds':digest_kinds, 'watch_symbols':watch_symbols,
+            'send_time':send_time, 'minimum_confidence':minimum, 'order_execution':False}
 
 
 def set_subscription_enabled(subscription_id: int, enabled: bool,
@@ -366,6 +381,9 @@ def set_subscription_enabled(subscription_id: int, enabled: bool,
         if cursor.rowcount != 1:
             raise ValueError("通知订阅不存在")
         conn.commit()
+        if not enabled:
+            conn.execute("UPDATE alert_outbox SET status='CANCELLED',error='订阅已停用' WHERE subscription_id=? AND status IN ('PENDING','RETRY')", (int(subscription_id),))
+            conn.commit()
     return {"id": int(subscription_id), "enabled": bool(enabled), "order_execution": False}
 
 
@@ -377,6 +395,8 @@ def subscription_payload(conn_factory: Callable = connect) -> dict:
         )]
     for row in rows:
         row["event_kinds"] = _load(row.pop("event_kinds_json"), [])
+        row['digest_kinds'] = _load(row.pop('digest_kinds_json'), [])
+        row['watch_symbols'] = _load(row.pop('watch_symbols_json'), [])
         row["enabled"] = bool(row["enabled"])
     return {"subscriptions": rows, "smtp": smtp_status(),
             "supported_channels": ["EMAIL"], "future_channels": ["FEISHU", "WECHAT"],
@@ -395,10 +415,15 @@ def queue_test_email(subscription_id: int | None = None,
         if not row:
             raise ValueError("启用中的通知订阅不存在")
         target = row["target"]
-    target = target or os.environ.get("ARGUS_ALERT_TO")
+    from .mail_settings import get_settings
+    target = target or get_settings()['default_target']
+    if not target:
+        raise ValueError('请先保存收件邮箱')
+    if not smtp_status().get('configured') or not smtp_status().get('send_enabled'):
+        raise ValueError('请先配置发件邮箱并打开邮件发送')
     queued = queue_alert(
         f"test:{uuid.uuid4().hex}", "[Rooftop] 邮件通道测试",
-        "Rooftop 邮件提醒通道测试成功。系统只发送研究提醒，不连接券商或自动下单。",
+        "如果你已在收件箱看到这封邮件，请回到 Rooftop 的发送记录点击“我已收到”。",
         target=target, subscription_id=subscription_id,
         metadata={"kind": "CHANNEL_TEST"}, conn_factory=conn_factory,
     )
