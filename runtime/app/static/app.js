@@ -5,6 +5,7 @@ const state = { dashboard: null, selected: null, chart: null, period: '1d', char
   reportPollTimer:null, bulkReportPollTimer:null, harnessPollTimer:null,
   overviewAssets:{}, libraryTab:'sources', libraryResults:[], logicData:null,
   portfolioImportMode:'manual', portfolioPreview:null,
+  quantRequestSerial:0, quantDecisionKey:null, quantViewKey:null, harnessDetailsBusy:false,
   harnessRunKey:null, harnessWorkflow:'quant_portfolio', quantDecision:null, quantDraft:{name:'白酒新能源半导体航天2%组合',capital:100000,
     horizon_months:12,target_return_pct:2,max_drawdown_pct:15,stop_loss_pct:8,
     take_profit_pct:20,trailing_stop_pct:8,sectors:'白酒,新能源,半导体,航空',stocks:'',max_candidates:30,
@@ -101,6 +102,11 @@ function askAccessToken() {
 
 async function request(url, options = {}, retried = false) {
   const headers = new Headers(options.headers || {});
+  const target = new URL(url, window.location.href);
+  if (target.origin === window.location.origin &&
+      ['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname)) {
+    headers.set('X-Argus-Local', '1');
+  }
   const token = sessionStorage.getItem('argus-remote-token');
   if (token) headers.set('X-Argus-Token', token);
   const response = await fetch(url, {...options, headers});
@@ -714,20 +720,32 @@ function forecastPointMetricsHtml(forecast){
 
 function quantTimeframeForecastHtml(item){
   const forecast=item.timeframe_forecast||{},summary=forecast.summary||{},sell=item.sell_conclusion||summary.sell_review||{},actionClass=summary.action==='SELL_REVIEW'?'sell':summary.action==='REDUCE_REVIEW'?'reduce':summary.action==='BUY_WATCH'?'buy':'hold',sellHtml=['TRIGGERED','WATCH'].includes(sell.status)&&sell.label?`<div class="quant-sell-conclusion"><b>${safe(sell.label)}</b><small>${safe(sell.reason||'')}</small></div>`:'',plotted=Number(forecast.horizon_trading_days||0),validated=Number(forecast.validated_horizon_trading_days??plotted),requested=Number(forecast.requested_horizon_trading_days||0),hasBaseline=(forecast.timeframes||[]).some(row=>row.status==='BASELINE_REFERENCE'),edge=(forecast.timeframes||[]).some(row=>row.status==='AVAILABLE'&&row.predictive_edge_detected),validationLabel=forecast.horizon_status==='FULL'?`严格校准覆盖全部 ${validated} 个交易日`:hasBaseline?`${validated?`严格校准 ${validated} 日；`:''}历史基准情景延伸至 ${plotted} / ${requested} 日`:`只校准到 ${validated} / ${requested} 个交易日`,basisLabel=edge?'条件模型通过增益检验':hasBaseline?'基准情景未证明预测优势':'没有证据优于历史基准';
-  const displayLabel=hasBaseline?(validated?`主图只显示已校准的前 ${validated} 日；长期基准见专业表格`:'没有通过检验的未来区间，主图不画预测带'):validationLabel;
-  return `<article class="quant-forecast-card ${actionClass}"><header><div><strong>${safe(item.name)} <small>${safe(item.symbol)}</small></strong><span>${safe(item.action_label||summary.action_label||'继续观察')} · ${safe(displayLabel)} · ${safe(basisLabel)}</span></div>${sellHtml}</header>${forecastPointMetricsHtml(forecast)}${stockForecastCurveSvg(forecast)}<footer><span>绿色实线：最近90根日K</span><span>${validated?`黄色虚线：前 ${validated} 日校准中位数`:'未绘制未校准预测线'}</span><span>${hasBaseline?'长期历史基准仅在专业表格显示':'深浅色带：样本外检验后的概率区间'}</span></footer></article>`;
+  const displayLabel=validated?'主图优先显示短期核心区间；更长期限可展开查看':'没有通过检验的未来区间，主图不画预测带';
+  return `<article class="quant-forecast-card ${actionClass}"><header><div><strong>${safe(item.name)} <small>${safe(item.symbol)}</small></strong><span>${safe(item.action_label||summary.action_label||'继续观察')} · ${safe(displayLabel)} · ${safe(basisLabel)}</span></div>${sellHtml}</header>${forecastPointMetricsHtml(forecast)}${stockForecastCurveSvg(forecast)}<footer><span>绿色实线：最近90根日K</span><span>${validated?'黄色虚线：所选检验期限的中位数':'未绘制未校准预测线'}</span><span>${hasBaseline?'长期历史基准仅在专业表格显示':'深浅色带：样本外检验后的概率区间'}</span></footer></article>`;
 }
 
-function stockForecastCurveSvg(forecast){
-  const history=(forecast.history_curve||[]).filter(item=>Number.isFinite(Number(item.price))),source=(forecast.forecast_curve||[]).filter(item=>Number.isFinite(Number(item.trading_day))&&['p10','p25','p50','p75','p90'].every(key=>Number.isFinite(Number(item[key])))),validatedDays=Math.max(0,Number(forecast.validated_horizon_trading_days||0)),hasReferenceTail=source.some(item=>item.basis==='HISTORICAL_BASELINE_REFERENCE'&&Number(item.trading_day)>validatedDays),future=hasReferenceTail?source.filter(item=>Number(item.trading_day)<=validatedDays):source;
+function stockForecastCurveSvg(forecast, expanded=false){
+  const history=(forecast.history_curve||[]).filter(item=>Number.isFinite(Number(item.price)));
+  const source=(forecast.forecast_curve||[]).filter(item=>Number.isFinite(Number(item.trading_day))&&['p10','p25','p50','p75','p90'].every(key=>item[key]!=null&&Number.isFinite(Number(item[key]))));
+  const periods=(forecast.timeframes||[]).filter(item=>item.status==='AVAILABLE'&&item.validation?.gate_passed===true);
+  const checked=source.filter(item=>item.validated===true&&Number(item.trading_day)>0&&periods.some(period=>Number(period.horizon_trading_days)===Number(item.trading_day))).sort((a,b)=>Number(a.trading_day)-Number(b.trading_day));
+  const corePoint=checked.find(item=>periods.find(period=>Number(period.horizon_trading_days)===Number(item.trading_day))?.validation?.central_50_coverage_gate===true);
+  const endpoint=expanded?checked.at(-1):(corePoint||checked[0]),maxForecastDay=Number(endpoint?.trading_day||0);
+  const report=periods.find(item=>Number(item.horizon_trading_days)===maxForecastDay),core=!expanded&&report?.validation?.central_50_coverage_gate===true;
+  const origin=source.find(item=>Number(item.trading_day)===0),future=endpoint&&origin?[origin,...(expanded?checked:[endpoint])]:[];
   if(history.length<2)return '<div class="empty-state">现有日K不足，无法进行滚动样本外校准</div>';
-  const hasForecast=future.length>1,hasVisibleBaseline=future.some(item=>item.basis==='HISTORICAL_BASELINE_REFERENCE'),maxForecastDay=hasForecast?Math.max(...future.map(item=>Number(item.trading_day))):0,w=820,h=260,left=64,right=24,top=28,bottom=48,plotRight=w-right,split=hasForecast?left+(plotRight-left)*.43:plotRight;
-  const values=[...history.map(item=>Number(item.price)),...future.flatMap(item=>[Number(item.p10),Number(item.p90)])],rawMin=Math.min(...values),rawMax=Math.max(...values),padding=Math.max((rawMax-rawMin)*.08,Math.abs(Number(history.at(-1).price))*.005,.01),min=rawMin-padding,max=rawMax+padding,span=Math.max(max-min,.0001);
+  const hasForecast=future.length>1,lowKey=core?'p25':'p10',highKey=core?'p75':'p90',bandLabel=core?'核心分位范围 P25—P75':'宽分位范围 P10—P90';
+  const w=820,h=260,left=64,right=24,top=28,bottom=48,plotRight=w-right,split=hasForecast?left+(plotRight-left)*.43:plotRight;
+  const values=[...history.map(item=>Number(item.price)),...future.flatMap(item=>[Number(item[lowKey]),Number(item[highKey])])],rawMin=Math.min(...values),rawMax=Math.max(...values),padding=Math.max((rawMax-rawMin)*.08,Math.abs(Number(history.at(-1).price))*.005,.01),min=rawMin-padding,max=rawMax+padding,span=Math.max(max-min,.0001);
   const xHistory=index=>left+index/(history.length-1)*(split-left),xFuture=day=>split+(maxForecastDay?day/maxForecastDay:0)*(plotRight-split),y=value=>top+(max-Number(value))/span*(h-top-bottom);
-  const historyPoints=history.map((item,index)=>`${xHistory(index).toFixed(1)},${y(item.price).toFixed(1)}`).join(' '),futurePoints=key=>future.map(item=>`${xFuture(Number(item.trading_day)).toFixed(1)},${y(item[key]).toFixed(1)}`).join(' '),bandPoints=(upper,lower)=>`${futurePoints(upper)} ${[...future].reverse().map(item=>`${xFuture(Number(item.trading_day)).toFixed(1)},${y(item[lower]).toFixed(1)}`).join(' ')}`;
-  const base=Number(history.at(-1).price),decimals=base<10?3:2,phaseLabel=hasVisibleBaseline?'历史基准概率情景':'样本外校准区间',forecastSvg=hasForecast?`<polygon class="forecast-band-wide" points="${bandPoints('p90','p10')}"/><polygon class="forecast-band-likely" points="${bandPoints('p75','p25')}"/><line class="forecast-start" x1="${split}" y1="${top}" x2="${split}" y2="${h-bottom}"/><line class="forecast-base" x1="${split}" y1="${y(base).toFixed(1)}" x2="${plotRight}" y2="${y(base).toFixed(1)}"/><polyline class="forecast-median ${hasVisibleBaseline?'baseline-reference':''}" points="${futurePoints('p50')}"/><text class="phase-label" x="${split+8}" y="${top+13}">${phaseLabel}</text>`:'';
-  const horizonNote=hasReferenceTail?(validatedDays?`精度优先：主图只显示通过滚动检验的前 ${validatedDays} 个交易日`:'没有未来区间通过样本外检验，主图不绘制预测带'):forecast.horizon_status==='FULL'?`已覆盖请求的 ${Number(forecast.requested_horizon_trading_days||maxForecastDay)} 个交易日`:(forecast.horizon_reason||`当前情景展示到 ${maxForecastDay} 个交易日`),title=hasForecast?'历史价格与已校准概率路径':'历史价格与校准状态',description=hasForecast?'绿色实线为最近日K收盘价，黄色虚线为经滚动样本外检验的中位数，阴影为同一校准期内的概率区间。':'绿色实线为最近日K收盘价；没有通过样本外检验的未来区间时不绘制黄色预测带。';
-  return `<div class="quant-chart-wrap stock-forecast-chart"><svg class="quant-equity-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${safe(String(forecast.symbol||''))}${safe(title)}"><title>${safe(title)}</title><desc>${safe(description)}</desc><line class="chart-grid" x1="${left}" y1="${top}" x2="${plotRight}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${h-bottom}" x2="${plotRight}" y2="${h-bottom}"/>${forecastSvg}<polyline class="history-line" points="${historyPoints}"/><text x="${left}" y="${top+13}">${money(max,decimals)}</text><text x="${left}" y="${h-bottom-6}">${money(min,decimals)}</text><text x="${left}" y="${h-12}">${safe(history[0].date)}</text><text x="${split}" y="${h-12}" text-anchor="middle">${safe(history.at(-1).date)}</text>${hasForecast?`<text x="${plotRight}" y="${h-12}" text-anchor="end">已验证 ${maxForecastDay} 个交易日</text>`:''}</svg><div class="quant-chart-legend"><span class="legend-history">历史收盘走线</span>${hasForecast?`<span class="legend-median">校准中位数</span><span class="legend-likely">核心范围 P25—P75</span><span class="legend-wide">已检验范围 P10—P90</span>`:''}</div><small class="quant-chart-note">${safe(horizonNote)}。${hasReferenceTail?'更长期历史基准只保留在“专业数据与计算依据”表格中，不作为精确预测。':''} 概率路径不是确定价格或收益承诺。</small></div>`;
+  const historyPoints=history.map((item,index)=>`${xHistory(index).toFixed(1)},${y(item.price).toFixed(1)}`).join(' '),futurePoints=key=>future.map(item=>`${xFuture(Number(item.trading_day)).toFixed(1)},${y(item[key]).toFixed(1)}`).join(' '),bandPoints=`${futurePoints(highKey)} ${[...future].reverse().map(item=>`${xFuture(Number(item.trading_day)).toFixed(1)},${y(item[lowKey]).toFixed(1)}`).join(' ')}`;
+  const base=Number(history.at(-1).price),decimals=base<10?3:2,baseline=endpoint?.basis==='CALIBRATED_BASELINE',medianLabel=baseline?'校准历史基准中位数':'校准中位数';
+  const forecastSvg=hasForecast?`<polygon class="${core?'forecast-band-likely':'forecast-band-wide'}" points="${bandPoints}"/><line class="forecast-start" x1="${split}" y1="${top}" x2="${split}" y2="${h-bottom}"/><line class="forecast-base" x1="${split}" y1="${y(base).toFixed(1)}" x2="${plotRight}" y2="${y(base).toFixed(1)}"/><polyline class="forecast-median" points="${futurePoints('p50')}"/><text class="phase-label" x="${split+8}" y="${top+13}">${core?'短期核心区间':'较宽参考区间'}</text>`:'';
+  const measured=report?.validation?.[core?'central_50_coverage':'wide_80_coverage'],count=Number(report?.validation?.evaluation_points||0);
+  const rangeSummary=hasForecast?`<div class="stock-forecast-points" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"><div><span>未来 ${maxForecastDay} 个交易日 · ${core?'核心区间':'宽区间'}</span><strong>¥${money(endpoint[lowKey],decimals)}—${money(endpoint[highKey],decimals)}</strong><small>${bandLabel}</small></div><div><span>${medianLabel}</span><strong>¥${money(endpoint.p50,decimals)}</strong><small>${baseline?'尚未证明优于历史基准':'使用通过检验的期限'}</small></div><div><span>历史样本外实测覆盖</span><strong>${measured==null?'暂无':`${(Number(measured)*100).toFixed(1)}%`}</strong><small>${count} 个检验样本${core?' · 核心区间之外的情况仍较常见':''}</small></div></div>`:'';
+  const title=hasForecast?`历史价格与未来 ${maxForecastDay} 日参考区间`:'历史价格与校准状态';
+  const detail=!expanded&&checked.length?`<details class="audit-details"><summary>查看至 ${Number(checked.at(-1).trading_day)} 个交易日的宽区间 P10—P90</summary>${stockForecastCurveSvg(forecast,true)}</details>`:'';
+  return `<div class="quant-chart-wrap stock-forecast-chart" data-forecast-view="${expanded?'wide':'focus'}" data-horizon-days="${maxForecastDay}">${rangeSummary}<svg class="quant-equity-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${safe(String(forecast.symbol||''))}${safe(title)}"><title>${safe(title)}</title><desc>实线为历史收盘价，虚线连接已检验期限的中位数。期限之间的连接线仅用于展示，不表示每日价格均经过检验。</desc><line class="chart-grid" x1="${left}" y1="${top}" x2="${plotRight}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${h-bottom}" x2="${plotRight}" y2="${h-bottom}"/>${forecastSvg}<polyline class="history-line" points="${historyPoints}"/><text x="${left}" y="${top+13}">${money(max,decimals)}</text><text x="${left}" y="${h-bottom-6}">${money(min,decimals)}</text><text x="${left}" y="${h-12}">${safe(history[0].date)}</text><text x="${split}" y="${h-12}" text-anchor="middle">${safe(history.at(-1).date)}</text>${hasForecast?`<text x="${plotRight}" y="${h-12}" text-anchor="end">未来 ${maxForecastDay} 个交易日</text>`:''}</svg><div class="quant-chart-legend"><span class="legend-history">历史收盘走线</span>${hasForecast?`<span class="legend-median">${medianLabel}</span><span class="${core?'legend-likely':'legend-wide'}">${bandLabel}</span>`:''}</div><small class="quant-chart-note">${hasForecast?(core?'主图聚焦最近通过检验的核心区间；范围较窄，同时覆盖的情形较少。':'显示通过检验期限的较宽区间。'):'没有通过检验的未来区间，主图不绘制预测带。'}长期历史基准仅在专业表格显示，不作为精确预测。概率路径不是确定价格或收益承诺。</small>${detail}</div>`;
 }
 
 function portfolioFutureCurveSvg(forecast,targetReturnPct){
@@ -814,7 +832,7 @@ function quantResultHtml(result){
     <div class="quant-decision-callout ${safe(decisionStatus.toLowerCase())}"><span>${funding.blocked?'参考策略的历史评估':safe(decisionHeading)}</span><strong><span class="beginner-only">${safe(decisionLabel)}</span><span class="professional-only">${safe(rawDecisionLabel)}</span></strong><small>目标 ${(targetReturn*100).toFixed(1)}% · 中位参考收益 ${(Number(exp.p50||0)*100).toFixed(1)}% · 与目标相差 ${targetGap>=0?'+':''}${(targetGap*100).toFixed(1)}%</small></div>
     <div class="quant-plain-metrics beginner-only"><div><span>历史中位参考</span><strong>${(Number(exp.p50||0)*100).toFixed(1)}%</strong></div><div><span>模拟出现亏损</span><strong>${(Number(exp.probability_loss||0)*100).toFixed(1)}%</strong></div><div><span>历史最大跌幅</span><strong>${(Math.abs(Number(metrics.max_drawdown||0))*100).toFixed(1)}%</strong></div></div>
     <div class="quant-metrics professional-only"><div><span>未来 ${horizonMonths||'—'} 个月模拟收益范围（较差 / 中位 / 较好）</span><strong>${(Number(exp.p10||0)*100).toFixed(1)}% / ${(Number(exp.p50||0)*100).toFixed(1)}% / ${(Number(exp.p90||0)*100).toFixed(1)}%</strong></div><div><span>模拟中达到目标的比例</span><strong>${(Number(exp.probability_target||0)*100).toFixed(1)}%</strong></div><div><span>模拟中出现亏损的比例</span><strong>${(Number(exp.probability_loss||0)*100).toFixed(1)}%</strong></div><div><span>历史最大跌幅${snapshot?'（相近参考策略）':''}</span><strong>${(Math.abs(Number(metrics.max_drawdown||0))*100).toFixed(1)}%</strong></div></div>
-    <div class="quant-grid quant-discipline-grid"><div><div class="subsection-head"><span>${positions.length?(snapshot?'当前数据推荐股票（待盘后验证）':'正式推荐股票'):trials.length?'重点关注股票':'推荐股票'}</span><small>按参考比例计算的剩余现金 ${(Number(positions.length?rec.cash_weight:rec.research_cash_weight||1)*100).toFixed(1)}%</small></div><div class="quant-allocation">${allocation}${unfundedAllocation}</div><div class="quant-rules"><span>下跌 ${Number(rules.stop_loss_pct||0).toFixed(1)}% 止损</span><span>${rules.take_profit_mode==='fixed'?'上涨':'开始浮动止盈'} ${Number(rules.take_profit_pct||0).toFixed(1)}%</span><span>盈利后回落 ${Number(rules.trailing_stop_pct||0).toFixed(1)}% 止盈</span><span>每 ${rules.rebalance_days||'—'} 个交易日重新评估</span></div></div></div>
+    <div class="quant-grid quant-discipline-grid"><div><div class="subsection-head"><span>${positions.length?(snapshot?'当前数据推荐股票（待盘后验证）':'正式推荐股票'):trials.length?'重点关注股票':'推荐股票'}</span><small>按参考比例计算的剩余现金 ${(Number(positions.length?rec.cash_weight:rec.research_cash_weight||1)*100).toFixed(1)}%</small></div><div class="quant-allocation">${allocation}${unfundedAllocation}</div>${rules.allocation_description?`<p class="agent-muted">${safe(rules.allocation_description)}。当前风险档位的单只仓位上限为 ${(Number(rules.max_position_pct||0)*100).toFixed(0)}%。</p>`:''}<div class="quant-rules"><span>下跌 ${Number(rules.stop_loss_pct||0).toFixed(1)}% 止损</span><span>${rules.take_profit_mode==='fixed'?'上涨':'开始浮动止盈'} ${Number(rules.take_profit_pct||0).toFixed(1)}%</span><span>盈利后回落 ${Number(rules.trailing_stop_pct||0).toFixed(1)}% 止盈</span><span>每 ${rules.rebalance_days||'—'} 个交易日重新评估</span></div></div></div>
     ${portfolioPrediction}${stockPredictions}${forecastEvidence}
     <section class="quant-plain-ranking beginner-only"><div class="subsection-head"><span>股票结论</span><small>只展示主要原因，不把缺失资料算成 0 分</small></div>${plainRanking||'<div class="empty-state">当前没有可比较的股票</div>'}</section>
     <section class="professional-only"><div class="subsection-head"><span>股票筛选结果</span><small>推荐股票置顶；综合分已使用你保存的五类关注重点</small></div><div class="table-wrap"><table class="quant-ranking-table"><thead><tr><th>#</th><th>股票</th><th>估算上涨概率</th><th>财务评分</th><th>数据完整度</th><th>近期涨跌</th><th>综合分</th><th>是否推荐 / 原因</th></tr></thead><tbody>${rankingRows}</tbody></table></div></section>
@@ -875,15 +893,16 @@ function quantDecisionOutputHtml(decision){
   if(decision.status==='PENDING_FIRST_POST_CLOSE')return `<div class="decision-empty"><strong>当前数据还不够，无法即时计算</strong><span>${safe(plainQuantText(decision.snapshot_error||'当前缓存缺少足够的候选股票日线；补齐数据后可重新点击查看。'))}</span></div>`;
   if(decision.status!=='AVAILABLE'||!decision.result)return `<div class="decision-empty"><strong>暂时没有可展示的推荐结果</strong><span>${safe(plainQuantText(decision.summary||'等待盘后更新完成'))}</span></div>`;
   const summary=quantDecisionSummary(decision),version=decision.version||{},ruleSnapshot=version.status==='RULE_SNAPSHOT',snapshot=version.status==='SNAPSHOT',status=ruleSnapshot?'即时预测结果':decision.update_pending?(snapshot?'后台正在重新计算，先显示最近交易日结果':'后台正在更新，先显示上一版结果'):(snapshot?'最近交易日结果':'最新正式结果');
-  return `<div class="decision-summary"><span class="status-tag">${safe(status)}</span><strong><span class="beginner-only">${safe(plainQuantText(summary))}</span><span class="professional-only">${safe(summary)}</span></strong><small>数据截至 ${safe(decision.data_asof||'—')}<span class="professional-only"> · 结果编号 ${safe(version.version_key||'—')} · 生成于 ${safe(localTimestamp(version.activated_at||version.created_at))}</span></small></div>${quantResultHtml({quant_portfolio:decision.result})}`;
+  return `<div class="decision-summary"><span class="status-tag">${safe(status)}</span><strong><span class="beginner-only">${safe(plainQuantText(summary))}</span><span class="professional-only">${safe(summary)}</span></strong><small>数据截至 ${safe(decision.data_asof||'—')}<span class="professional-only"> · 结果编号 ${safe(version.version_key||'—')} · 生成于 ${safe(localTimestamp(version.activated_at||version.created_at))}</span></small></div>${decision.result.allocation_warning?`<p class="lab-warning">${safe(decision.result.allocation_warning)}</p>`:''}${quantResultHtml({quant_portfolio:decision.result})}`;
 }
 
 function quantDecisionPanelHtml(_detail,learning,_quantVersions,sectorCache){
   const decision=state.quantDecision,d=state.quantDraft,cycle=learning?.last_cycle,metrics=cycle?.metrics||{},version=decision?.version;
   const dataState=decision?.data_asof?`评估数据更新至 ${safe(decision.data_asof)}`:'等待第一次盘后更新';
-  const ruleSnapshot=version?.status==='RULE_SNAPSHOT',snapshot=version?.status==='SNAPSHOT',freshness=quantAllocationState(decision?.result).blocked?'有筛选结果，当前资金未分配':ruleSnapshot?'当前显示即时K线预测，正式模型与回测待验证':decision?.update_pending?(snapshot?'后台正在重新计算，当前先用最近交易日结果':'后台正在计算新结果，当前先用上一版'):snapshot?'今天不开盘或尚未完成更新：使用最近一个交易日的评估结果':cycle&&metrics.market_date_complete===false?'盘后数据还没到齐，稍后自动重试':decision?.status==='AVAILABLE'?'当前显示最近一次正式结果':'等待每日盘后更新';
+  const ruleSnapshot=version?.status==='RULE_SNAPSHOT',snapshot=version?.status==='SNAPSHOT',freshness=quantAllocationState(decision?.result).blocked?'有筛选结果，当前资金未分配':ruleSnapshot?'当前显示即时K线预测，正式模型与回测待验证':decision?.update_pending?(snapshot?'后台正在重新计算，当前先用最近交易日结果':'后台正在计算新结果，当前先用上一版'):snapshot?'休市也可查看：使用最近有效交易日的评估结果':cycle&&metrics.market_date_complete===false?'盘后数据还没到齐，稍后自动重试':decision?.status==='AVAILABLE'?'当前显示最近一次正式结果':'随时可设置条件并读取本地有效数据';
   const cache=sectorCache||{},cacheTotal=Number(cache.total_symbols||0),cacheMarket=Number(cache.market_cached||0),cacheModel=Number(cache.model_ready||0),cacheFundamental=Number(cache.fundamentals_cached||0),cacheProgress=cacheTotal?Math.max(0,Math.min(100,Number(cache.market_percent||0))):0;
   return `<section class="panel decision-entry"><div class="panel-head"><div><p class="eyebrow">投资条件</p><h2>填写条件，查看股票推荐</h2></div><div class="daily-decision-state"><span>${dataState}</span><strong>${safe(freshness)}</strong><small>${version?`结果编号 ${safe(version.version_key)}`:'还没有可用结果'}</small></div></div>
+    <div class="quant-availability"><div><strong>股票推荐全天可用</strong><span>收盘、周末与节假日使用最近有效数据，后台更新不影响查看。</span><small id="quantAvailabilityStatus" role="status">${decision?.data_asof?`最近结果的数据日期：${safe(decision.data_asof)}`:'填写条件后即可查看；没有足够数据时会说明原因。'}</small></div><button id="refreshQuantDecision" class="secondary-button" type="button">刷新推荐结果</button></div>
     <div class="sector-cache-strip professional-only"><div><strong>四个板块的历史数据</strong><span>${safe(harnessStatus(cache.status||'IDLE'))} · 数据截至 ${safe(cache.target_asof||'—')}</span></div><div class="sector-cache-counts"><span>股票总数 <b>${cacheTotal}</b></span><span>日线数据已保存 <b>${cacheMarket}</b></span><span>可用于评估 <b>${cacheModel}</b></span><span>财务数据已保存 <b>${cacheFundamental}</b></span></div><div class="sector-cache-track"><i style="width:${cacheProgress}%"></i></div><small>行情会尽可能缓存并至少保留最近 1 年；当前选择近 ${Number(d.backtest_window_years||3)} 年回测，需要至少 ${Math.max(420,Number(d.backtest_window_years||3)*252)} 个交易日且覆盖最近交易日。每天收盘后加入最新一天，并移除窗口外最旧一天。</small></div>
     <div class="decision-form">
       <div class="risk-profile-control"><span>风险偏好</span><div class="risk-profile-segments" role="group" aria-label="风险偏好">
@@ -898,7 +917,7 @@ function quantDecisionPanelHtml(_detail,learning,_quantVersions,sectorCache){
       <label><span class="decision-field-label"><span>止损（%）</span><small>上限为最大回撤</small></span><input data-quant-draft="stop_loss_pct" id="quickStopLoss" type="number" min="1" max="${Number(d.max_drawdown_pct)}" value="${Number(d.stop_loss_pct)}"></label>
       <label>开始浮动止盈的涨幅（%）<input data-quant-draft="take_profit_pct" id="quickTakeProfit" type="number" min="1" max="300" value="${Number(d.take_profit_pct)}"></label>
       <label class="decision-sector-field">关注板块<input data-quant-draft="sectors" id="quickSectors" value="${safe(d.sectors)}" placeholder="例如 白酒、新能源"></label>
-      <label>最多持有（只）<input data-quant-draft="max_positions" id="quickPositions" type="number" min="1" max="8" value="${Number(d.max_positions)}"></label>
+      <label>最多持有（只）<input data-quant-draft="max_positions" id="quickPositions" type="number" min="1" max="8" value="${Number(d.max_positions)}"><small>仅限制数量，各只金额按评分与风险分别计算</small></label>
       <label class="professional-only">最多比较多少套参数<input data-quant-draft="max_iterations" id="quickIterations" type="number" min="1" max="20" value="${Number(d.max_iterations)}"><small>每个风险档位最多比较的方案数；越多，盘后计算越久</small></label>
       <button id="quickQuantRun" class="primary-button">按这些条件查看推荐</button><p id="quantDecisionMessage" class="decision-action-message" role="status"></p>
     </div>
@@ -937,7 +956,7 @@ function renderHarness(data,detail){
   const strategyRetryRows=strategyRetryJobs.map(item=>`<div class="harness-row"><div><span class="badge">已尝试 ${item.attempt_count||0} 批</span><strong>${safe(item.mandate?.name||item.retry_key)}</strong><p>${item.active_version_key?'已通过全部门禁':(item.last_error?`上次错误：${safe(item.last_error)}`:'风险或非退化门禁未全部通过')}</p><small>最近数据 ${safe(item.last_data_asof||'—')} · 下一批从第 ${(item.next_candidate_offset||0)+1} 个方案开始</small></div><span class="status-tag">${safe(harnessStatus(item.status))}</span></div>`).join('');
   const sentimentRows=sentimentSources.map(item=>`<div class="harness-row"><div><span class="badge">${safe(item.source_kind)}</span><strong>${safe(item.source_code)}</strong><p>文档 ${item.document_count||0} · ${Number(item.latency_ms||0).toFixed(0)} ms</p><small>${safe(item.error||item.last_success_at||'尚无成功记录')}</small></div><span class="status-tag">${safe(item.status)}</span></div>`).join('');
   const codeCheckRows=(codeEvolution.last_evaluation?.checks||[]).map(item=>`<div class="harness-row"><div><strong>${safe(item.name||'门禁检查')}</strong><small>${Number(item.duration_seconds||0).toFixed(1)} 秒</small></div><span class="status-tag">${Number(item.returncode)===0?'通过':'失败'}</span></div>`).join('');
-  $('#harnessView').innerHTML=`${quantDecisionPanelHtml(detail,learning,quantVersions,data.sector_cache)}<details class="advanced-harness professional-disclosure"><summary>专业运行记录与高级设置</summary><div class="advanced-harness-body"><section class="research-summary"><article class="metric-card"><span>代理运行</span><strong>${rs.runs||0}</strong><small>${rs.running||0} 正在执行</small></article><article class="metric-card"><span>等待批准</span><strong>${rs.waiting_approval||0}</strong><small>高影响操作门禁</small></article><article class="metric-card"><span>可恢复</span><strong>${(rs.failed||0)+(rs.interrupted||0)}</strong><small>保留步骤检查点</small></article><article class="metric-card accent"><span>允许工具</span><strong>${runtime.tools?.length||0}</strong><small>无 Shell · 不下单</small></article></section>
+  const harnessMarkup=`${quantDecisionPanelHtml(detail,learning,quantVersions,data.sector_cache)}<details id="harnessAdvanced" class="advanced-harness professional-disclosure"><summary>专业运行记录与高级设置</summary><div class="advanced-harness-body"><section class="research-summary"><article class="metric-card"><span>代理运行</span><strong>${rs.runs||0}</strong><small>${rs.running||0} 正在执行</small></article><article class="metric-card"><span>等待批准</span><strong>${rs.waiting_approval||0}</strong><small>高影响操作门禁</small></article><article class="metric-card"><span>可恢复</span><strong>${(rs.failed||0)+(rs.interrupted||0)}</strong><small>保留步骤检查点</small></article><article class="metric-card accent"><span>允许工具</span><strong>${runtime.tools?.length||0}</strong><small>无 Shell · 不下单</small></article></section>
   <section class="panel agent-launcher"><div class="panel-head"><div><p class="eyebrow">BOUNDED AGENT LOOP</p><h2>启动领域工作流</h2></div><button id="harnessRefreshButton" class="secondary-button">刷新状态</button></div><div class="agent-launch-form"><label>工作流<select id="harnessWorkflow">${workflows}</select></label><div class="agent-workflow-fields" data-workflow="stock_analysis"><label>股票<input id="harnessAgentStocks" value="600519,000858" placeholder="2-8 只股票"></label><label>投资态度<select id="harnessAgentProfile"><option value="aggressive">激进派</option><option value="balanced" selected>中间派</option><option value="conservative">保守派</option></select></label><label>研究主题<input id="harnessResearchQuery" placeholder="可选"></label></div><div class="agent-workflow-fields" data-workflow="quality_audit"><label>巡检股票数<input id="harnessAuditLimit" type="number" min="1" max="100" value="20"></label></div><div class="agent-workflow-fields quant-portfolio-fields" data-workflow="quant_portfolio"><label>组合名称<input id="quantName" value="A股量化组合"></label><label>本金（元）<input id="quantCapital" type="number" min="1000" value="100000"></label><label>期限（月）<input id="quantHorizon" type="number" min="1" max="120" value="12"></label><label>目标收益（%）<input id="quantTarget" type="number" min="0" max="300" value="20"></label><label>最大回撤（%）<input id="quantDrawdown" type="number" min="1" max="80" value="15"></label><label>止损（%）<input id="quantStopLoss" type="number" min="1" max="80" value="8"></label><label>止盈目标（%）<input id="quantTakeProfitPct" type="number" min="1" max="300" value="20"></label><label>移动止盈回撤（%）<input id="quantTrailingStop" type="number" min="1" max="80" value="8"></label><label>关注板块<input id="quantSectors" value="消费,新能源" placeholder="例如 白酒、新能源、银行"></label><label>候选股票（可选）<input id="quantStocks" placeholder="留空则按板块自动筛选"></label><label>候选池数量<input id="quantCandidates" type="number" min="2" max="30" value="12"></label><label>同时持仓<input id="quantPositions" type="number" min="1" max="8" value="2"></label><label>风险档位<select id="quantRiskProfile"><option value="auto" selected>自动择优</option><option value="aggressive">激进</option><option value="balanced">平衡</option><option value="conservative">保守</option></select></label><label>止盈方式<select id="quantTakeProfitMode"><option value="trailing" selected>浮动止盈</option><option value="fixed">固定止盈</option></select></label><label>迭代次数<input id="quantIterations" type="number" min="1" max="20" value="10"></label></div><div class="agent-workflow-fields strategy-evolution-fields" data-workflow="strategy_evolution"><label>实验名称<input id="strategyMandateName" value="三档组合策略实验"></label><label>本金（元）<input id="strategyCapital" type="number" min="1000" value="100000"></label><label>期限（月）<input id="strategyHorizon" type="number" min="3" max="120" value="12"></label><label>目标收益（%）<input id="strategyTarget" type="number" min="0" max="300" value="20"></label><label>最大回撤（%）<input id="strategyDrawdown" type="number" min="1" max="80" value="20"></label><label>股票池<input id="strategyStocks" value="600519,000858,300750" placeholder="2-8 只股票"></label><label>关注板块<input id="strategySectors" value="消费,新能源" placeholder="可选，逗号分隔"></label><label>同时持仓<input id="strategyPositions" type="number" min="1" max="8" value="2"></label><label>迭代次数<input id="strategyIterations" type="number" min="1" max="20" value="10"></label><label>止盈方式<select id="strategyTakeProfit"><option value="trailing" selected>浮动止盈</option><option value="fixed">固定止盈</option></select></label></div><div class="agent-workflow-fields" data-workflow="continuous_learning"><label>运行阶段<select id="learningPhase"><option value="BACKFILL" selected>立即回填评估</option><option value="PRE_OPEN">盘前预测</option><option value="POST_CLOSE">盘后完整进化</option></select></label><label>股票数<input id="learningStockLimit" type="number" min="3" max="100" value="20"></label><label>社交平台股票数<input id="learningSocialLimit" type="number" min="0" max="10" value="3"></label><label>Qwen3 适配轮数<input id="learningDeepEpochs" type="number" min="4" max="100" value="32"></label><label>回撤门禁（%）<input id="learningDrawdown" type="number" min="1" max="80" value="15"></label><label><input id="learningDeep" type="checkbox" checked> Qwen3 时序模型</label><label><input id="learningIntraday" type="checkbox" checked> 5 分钟策略</label><label><input id="learningCode" type="checkbox" checked> 源码候选门禁</label></div><div class="agent-workflow-fields" data-workflow="strategy_activation"><label>策略实验<select id="strategyExperimentKey">${experimentOptions}</select></label></div><div class="agent-workflow-fields" data-workflow="candidate_activation"><label>候选 ID<input id="harnessCandidateId" type="number" min="1" placeholder="例如 3"></label></div><div class="agent-workflow-fields" data-workflow="version_rollback"><label>目标版本<select id="harnessRollbackVersion">${rollbackOptions}</select></label></div><label class="agent-intent">任务目标<input id="harnessAgentIntent" placeholder="本次运行的验收目标"></label><label class="agent-thread-toggle"><input id="harnessContinueThread" type="checkbox" ${detail?'':'disabled'}>沿用当前线程</label><button id="harnessStartRun" class="primary-button">开始运行</button></div><p class="lab-warning">每日盘后按同一数据快照更新行情、舆情、模型、分钟策略与受控源码版本；不连接券商、不执行真实交易。</p></section>
   <section class="agent-workspace"><aside class="panel agent-run-list"><div class="subsection-head"><span>运行队列</span><small>${runs.length} 条</small></div>${runRows||'<div class="empty-state">尚无代理运行</div>'}</aside>${harnessRunDetailHtml(detail)}</section>
   <div class="harness-section-title"><p class="eyebrow">CONTINUOUS LEARNING LOOP</p><h2>A 股持续学习闭环</h2></div>${learningProgressHtml(learning.last_cycle)}<section class="research-summary"><article class="metric-card"><span>当前预测模型</span><strong>${learning.active_model?'ONLINE · ACTIVE':'未初始化'}</strong><small>${safe(learning.active_model?.training_end||'等待首轮回测')}</small></article><article class="metric-card"><span>已评分预测</span><strong>${predictionStats.scored||0}</strong><small>待评分 ${predictionStats.pending||0} 条</small></article><article class="metric-card"><span>真实方向准确率</span><strong>${predictionStats.accuracy===null||predictionStats.accuracy===undefined?'—':(Number(predictionStats.accuracy)*100).toFixed(1)+'%'}</strong><small>Brier ${predictionStats.brier===null||predictionStats.brier===undefined?'—':Number(predictionStats.brier).toFixed(4)}</small></article><article class="metric-card accent"><span>${learningEval.gate?.evaluation_scope==='incremental_forward'?'增量候选评估':'滚动候选评估'}</span><strong>${candidateMetrics.directional_accuracy===undefined?'—':(Number(candidateMetrics.directional_accuracy)*100).toFixed(1)+'%'}</strong><small>${safe(learningEval.status||'尚未运行')} · ${candidateMetrics.trading_days||0} 日 / ${candidateMetrics.sample_count||0} 样本 · 回撤 ${candidateMetrics.max_drawdown===undefined?'—':(Number(candidateMetrics.max_drawdown)*100).toFixed(1)+'%'}</small></article></section>
@@ -949,7 +968,13 @@ function renderHarness(data,detail){
   <section class="panel harness-autonomy"><div class="panel-head"><div><p class="eyebrow">主动预测与修正</p><h2>自主巡检摘要</h2></div><button id="harnessAutonomyButton" class="primary-button">立即自主巡检</button></div><p class="autonomy-summary">${autonomy?safe(autonomy.summary):'服务启动后自动运行，检查股票解析、搜索可达性、日线覆盖、策略契约和 Skill 说明。'}</p><div class="harness-list">${autonomyFindings}</div><p class="lab-warning">巡检可以记录案例、生成候选和运行回归，但不会自动切换当前配置；晋级和回滚必须明确批准。</p></section>
   <section class="panel harness-submit"><div class="panel-head"><div><p class="eyebrow">坏案例采集</p><h2>提交坏案例</h2></div><button id="harnessBaselineButton" class="secondary-button">运行全量回归</button></div><div class="harness-form"><select id="harnessCaseType"><option value="search_no_result">搜索无结果</option><option value="stock_resolution">股票识别错误</option><option value="ranking_mismatch">排序不符合期望</option><option value="data_gap">数据缺失</option><option value="interaction_failure">页面交互失败</option><option value="comparison_error">股票对比异常</option></select><select id="harnessSeverity"><option value="MEDIUM">中等</option><option value="HIGH">严重</option><option value="CRITICAL">关键</option><option value="LOW">轻微</option></select><textarea id="harnessInput" placeholder='输入JSON，例如 {"query":"红太杨"}'></textarea><textarea id="harnessExpected" placeholder='期望JSON，例如 {"canonical_query":"000525","symbol":"000525"}'></textarea><textarea id="harnessObserved" placeholder="实际结果JSON，可留空"></textarea><input id="harnessNotes" placeholder="补充说明"><button id="harnessSubmitButton" class="primary-button">记录坏案例</button></div><p class="lab-warning">人工反馈与自主巡检共享同一回归集；不把未经验证的猜测直接写入当前策略。</p></section>
   <section class="harness-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">回归案例集</p><h2>坏案例回归集</h2></div><span class="count">${cases.length} 条</span></div><div class="harness-list">${caseRows||'<div class="empty-state">尚无坏案例</div>'}</div></article><article class="panel"><div class="panel-head"><div><p class="eyebrow">候选门禁</p><h2>候选与晋级门禁</h2></div><span class="count">人工批准</span></div><div class="harness-list">${candidateRows||'<div class="empty-state">尚无候选改进</div>'}</div></article></section>
-  <section class="panel"><div class="panel-head"><div><p class="eyebrow">版本控制</p><h2>配置版本与回滚</h2></div><span class="count">当前 ${safe(data.active_version.version_key)}</span></div><div class="harness-list">${versionRows}</div></section></div></details>`;
+  <section class="panel"><div class="panel-head"><div><p class="eyebrow">版本控制</p><h2>配置版本与回滚</h2></div><span class="count">当前 ${safe(data.active_version?.version_key||'baseline')}</span></div><div class="harness-list">${versionRows}</div></section></div></details>`;
+  const existingAdvanced=$('#harnessAdvanced');
+  if(existingAdvanced&&$('#quantDecisionOutput')){
+    const template=document.createElement('template');template.innerHTML=harnessMarkup;
+    const next=template.content.querySelector('#harnessAdvanced');
+    next.open=existingAdvanced.open;existingAdvanced.replaceWith(next);
+  }else $('#harnessView').innerHTML=harnessMarkup;
   $('#quantRiskProfile option[value="auto"]')?.remove();
   if($('#quantRiskProfile'))$('#quantRiskProfile').value='balanced';
   document.querySelectorAll('#harnessView details.stock-profile').forEach(details=>{const symbol=details.closest('tr')?.querySelector('td:nth-child(2) small')?.textContent;details.open=Boolean(symbol&&openStockProfiles.has(symbol));});
@@ -957,45 +982,139 @@ function renderHarness(data,detail){
 }
 
 function updateHarnessWorkflowFields(){document.querySelectorAll('.agent-workflow-fields').forEach(item=>item.classList.toggle('active',item.dataset.workflow===state.harnessWorkflow));}
+function quantInputKey(input){
+  const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+  const {name,refresh_data,collect_sentiment,...constraints}=input;
+  return JSON.stringify(canonical(constraints));
+}
+
+async function quantRequest(url,options={},timeoutMs=45000){
+  const controller=new AbortController();let timer;
+  try{
+    return await Promise.race([request(url,{...options,signal:controller.signal}),new Promise((_,reject)=>{
+      timer=window.setTimeout(()=>{reject(new Error('读取超时，服务可能繁忙'));controller.abort();},timeoutMs);
+    })]);
+  }finally{window.clearTimeout(timer);}
+}
+
+function quantReadStatus(message){
+  const status=$('#quantAvailabilityStatus');if(status)status.textContent=message;
+}
+
+function renderQuantOutcome(decision){
+  const output=$('#quantDecisionOutput');if(!output)return;
+  output.innerHTML=`<div class="panel-head"><div><p class="eyebrow">推荐结果</p><h2>本次结论</h2></div><span class="count">研究用途 · 不下单</span></div>${quantDecisionOutputHtml(decision)}`;
+  const available=decision?.status==='AVAILABLE'&&!!decision.result,freshness=$('.daily-decision-state');
+  if(freshness){
+    freshness.querySelector('span').textContent=decision?.data_asof?`评估数据更新至 ${decision.data_asof}`:'暂无可用评估数据';
+    freshness.querySelector('strong').textContent=available?(quantAllocationState(decision.result).blocked?'有筛选结果，当前资金未分配':'最近有效结果可随时查看'):'填写条件即可查看，休市不影响使用';
+    freshness.querySelector('small').textContent=decision?.version?.version_key?`结果编号 ${decision.version.version_key}`:'尚未生成结果版本';
+  }
+}
+
+function markQuantInputChanged(){
+  state.quantRequestSerial++;
+  const key=quantInputKey({...state.quantDraft,take_profit_mode:'trailing'});
+  if(state.quantDecisionKey&&key!==state.quantDecisionKey){
+    state.quantDecision=null;state.quantDecisionKey=null;renderQuantOutcome(null);
+    quantReadStatus('投资条件已修改，请点击“按这些条件查看推荐”重新计算。');
+  }
+}
+
+function bindQuantDecisionInputs(){
+  document.querySelectorAll('[data-quant-draft]').forEach(element=>{const save=()=>{state.quantDraft[element.dataset.quantDraft]=element.type==='number'?Number(element.value):element.value;persistQuantDraft();markQuantInputChanged();};element.oninput=save;element.onchange=save;});
+  document.querySelectorAll('[data-quant-profile]').forEach(button=>button.onclick=()=>{state.quantDraft.risk_profile=button.dataset.quantProfile;persistQuantDraft();markQuantInputChanged();document.querySelectorAll('[data-quant-profile]').forEach(item=>item.classList.toggle('active',item===button));});
+  $('#quickQuantRun').onclick=viewQuickQuantRecommendation;
+  if($('#refreshQuantDecision'))$('#refreshQuantDecision').onclick=loadHarness;
+}
+
 async function viewQuickQuantRecommendation(){
   const button=$('#quickQuantRun'),message=$('#quantDecisionMessage'),output=$('#quantDecisionOutput');
+  const input=quantDecisionInput(),key=quantInputKey(input),serial=++state.quantRequestSerial;
+  const current=()=>serial===state.quantRequestSerial&&key===quantInputKey(quantDecisionInput());
   button.disabled=true;button.textContent='正在读取推荐…';
   if(message)message.textContent='正在按这些条件读取推荐结果…';
+  quantReadStatus('正在读取最近有效数据；非交易时段也可计算。');
   try{
-    const registered=await request('/api/quant/mandates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:quantDecisionInput()})});
+    const registered=await quantRequest('/api/quant/mandates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input})});
+    if(!current())return;
     const decision=registered.decision;
     if(!decision)throw new Error('服务未返回推荐结果，请重试');
-    state.quantDecision=decision;
-    output.innerHTML=`<div class="panel-head"><div><p class="eyebrow">推荐结果</p><h2>本次结论</h2></div><span class="count">研究用途 · 不下单</span></div>${quantDecisionOutputHtml(decision)}`;
+    state.quantDecision=decision;state.quantDecisionKey=key;state.quantViewKey=key;
+    renderQuantOutcome(decision);
     const available=decision.status==='AVAILABLE'&&!!decision.result;
     const blocked=available&&quantAllocationState(decision.result).blocked;
     const notice=available?(blocked?'结果已显示：当前分配不足一手，暂无可投入组合。':'结果已显示：请查看下方“本次结论”。'):'当前无法生成推荐，具体原因已显示在“本次结论”。';
     if(message)message.textContent=notice;
-    const freshness=$('.daily-decision-state');
-    if(freshness){
-      freshness.querySelector('span').textContent=decision.data_asof?`评估数据更新至 ${decision.data_asof}`:'暂无可用评估数据';
-      freshness.querySelector('strong').textContent=blocked?'有筛选结果，当前资金未分配':available?'推荐结果已显示在下方':'暂无可展示的推荐';
-      freshness.querySelector('small').textContent=decision.version?.version_key?`结果编号 ${decision.version.version_key}`:'尚未生成结果版本';
-    }
+    quantReadStatus(available?`已读取有效结果 · 数据截至 ${decision.data_asof||'未标注'} · 休市仍可查看和调整条件。`:'当前条件尚无足够数据，原因已显示；可调整条件后重试。');
     output.scrollIntoView({behavior:'smooth',block:'start'});
-    output.focus({preventScroll:true});
-    showToast(notice);
+    output.focus({preventScroll:true});showToast(notice);
   }catch(error){
-    const notice=`读取推荐失败：${error.message}。可重试。`;
+    if(!current())return;
+    const retained=state.quantDecisionKey===key&&state.quantDecision?.status==='AVAILABLE';
+    const notice=`读取推荐失败：${error.message}。${retained?`保留上次成功结果，数据截至 ${state.quantDecision.data_asof||'未标注'}。`:'请检查本机服务后重试；这不是休市限制。'}`;
     if(message)message.textContent=notice;
-    showToast(notice);
-  }finally{
-    button.disabled=false;button.textContent='按这些条件查看推荐';
+    quantReadStatus(notice);showToast(notice);
+  }finally{button.disabled=false;button.textContent='按这些条件查看推荐';}
+}
+
+function scheduleHarnessPoll(detail,learningCycle,sectorCache){
+  window.clearTimeout(state.harnessPollTimer);
+  const active=detail&&['QUEUED','RUNNING'].includes(detail.run.status)||learningCycle?.status==='RUNNING'||['QUEUED','RUNNING_MARKET','RUNNING_FUNDAMENTALS'].includes(sectorCache?.status);
+  if(active&&$('#harnessAdvanced')?.open&&document.querySelector('#harnessView.active'))state.harnessPollTimer=window.setTimeout(loadHarnessDetails,HARNESS_ACTIVE_POLL_MS);
+}
+
+async function loadHarnessDetails(){
+  if(state.harnessDetailsBusy)return;
+  state.harnessDetailsBusy=true;
+  const panel=$('#harnessAdvanced');
+  try{
+    const data=await quantRequest('/api/harness',{},12000),runtime=data.agent_runtime||{},runs=runtime.runs||[];
+    if(!state.harnessRunKey){const preferred=runtime.latest_quant_run||runs.find(item=>item.workflow==='quant_portfolio')||runs[0];if(preferred)state.harnessRunKey=preferred.run_key;}
+    let detail=null;
+    if(state.harnessRunKey){try{detail=await quantRequest(`/api/harness/runs/${encodeURIComponent(state.harnessRunKey)}`,{},12000);}catch{state.harnessRunKey=null;}}
+    renderHarness(data,detail);updateHarnessWorkflowFields();
+    scheduleHarnessPoll(detail,data.continuous_learning?.last_cycle,data.sector_cache);
+  }catch(error){
+    if(panel?.isConnected){
+      let status=panel.querySelector('.harness-details-status');
+      if(!status){status=document.createElement('p');status.className='harness-details-status';panel.append(status);}
+      status.textContent=`后台状态暂时无法读取：${error.message}。上方股票推荐仍可使用。`;
+      let retry=panel.querySelector('.harness-details-retry');
+      if(!retry){retry=document.createElement('button');retry.className='secondary-button harness-details-retry';retry.textContent='重试后台状态';panel.append(retry);}
+      retry.onclick=loadHarnessDetails;
+    }
+  }finally{state.harnessDetailsBusy=false;}
+}
+
+async function loadHarness(){
+  const view=$('#harnessView');if(!view)return;
+  const input=quantDecisionInput(),key=quantInputKey(input),serial=++state.quantRequestSerial;
+  const current=()=>serial===state.quantRequestSerial&&key===quantInputKey(quantDecisionInput());
+  if(!$('#quantDecisionOutput')||state.quantViewKey!==key){
+    if(state.quantDecisionKey!==key)state.quantDecision=null;
+    view.innerHTML=quantDecisionPanelHtml(null,null,null,null)+`<details id="harnessAdvanced" class="advanced-harness professional-disclosure"><summary>专业运行记录与高级设置</summary><p class="harness-details-status">展开后读取后台状态，不影响上方推荐。</p></details>`;
+    $('#harnessAdvanced').ontoggle=event=>{if(event.target.open)loadHarnessDetails();};
+    state.quantViewKey=key;bindQuantDecisionInputs();
+  }
+  quantReadStatus(state.quantDecision?.data_asof?`保留已有结果（数据截至 ${state.quantDecision.data_asof}），正在检查更新…`:'正在读取最近有效数据，投资条件可继续编辑。');
+  if($('#harnessAdvanced')?.open)void loadHarnessDetails();
+  try{
+    const decision=await quantRequest('/api/quant/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input})});
+    if(!current())return;
+    if(!decision||!decision.status)throw new Error('服务没有返回有效的推荐状态');
+    state.quantDecision=decision;state.quantDecisionKey=key;
+    renderQuantOutcome(decision);
+    quantReadStatus(decision.status==='AVAILABLE'?`已读取有效结果 · 数据截至 ${decision.data_asof||'未标注'} · 收盘、周末与节假日均可查看。`:decision.status==='UNREGISTERED'?'这组条件尚未保存。点击“按这些条件查看推荐”，即可使用本地缓存计算。':'尚无足够数据生成推荐，具体原因已显示；休市不会禁用该页面。');
+  }catch(error){
+    if(!current())return;
+    const retained=state.quantDecisionKey===key&&state.quantDecision?.status==='AVAILABLE';
+    quantReadStatus(`读取暂时失败：${error.message}。${retained?`保留上次成功结果，数据截至 ${state.quantDecision.data_asof||'未标注'}。`:'投资条件仍可编辑，可点击刷新重试；请确认本机服务运行。'}`);
   }
 }
 
-function scheduleHarnessPoll(detail,learningCycle,sectorCache){window.clearTimeout(state.harnessPollTimer);const runActive=detail&&['QUEUED','RUNNING'].includes(detail.run.status),learningActive=learningCycle&&learningCycle.status==='RUNNING',cacheActive=sectorCache&&['QUEUED','RUNNING_MARKET','RUNNING_FUNDAMENTALS'].includes(sectorCache.status);if((runActive||learningActive||cacheActive)&&document.querySelector('#harnessView.active'))state.harnessPollTimer=window.setTimeout(loadHarness,HARNESS_ACTIVE_POLL_MS);}
-async function loadHarness(){const view=$('#harnessView');if(!view)return;if(!view.children.length)view.innerHTML='<div class="search-loading">正在读取股票推荐…</div>';try{const [data,decision]=await Promise.all([request('/api/harness'),request('/api/quant/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:quantDecisionInput()})})]);state.quantDecision=decision;const runtime=data.agent_runtime||{},runs=runtime.runs||[];if(!state.harnessRunKey){const preferred=runtime.latest_quant_run||runs.find(item=>item.workflow==='quant_portfolio')||runs[0];if(preferred)state.harnessRunKey=preferred.run_key;}let detail=null;if(state.harnessRunKey){try{detail=await request(`/api/harness/runs/${encodeURIComponent(state.harnessRunKey)}`);}catch{state.harnessRunKey=null;}}renderHarness(data,detail);updateHarnessWorkflowFields();scheduleHarnessPoll(detail,data.continuous_learning?.last_cycle,data.sector_cache);}catch(error){view.innerHTML=`<div class="empty-state">${safe(error.message)}</div>`;}}
-
 function bindHarness(data,detail){
-  document.querySelectorAll('[data-quant-draft]').forEach(element=>{const save=()=>{state.quantDraft[element.dataset.quantDraft]=element.type==='number'?Number(element.value):element.value;persistQuantDraft();};element.oninput=save;element.onchange=save;});
-  document.querySelectorAll('[data-quant-profile]').forEach(button=>button.onclick=()=>{state.quantDraft.risk_profile=button.dataset.quantProfile;persistQuantDraft();document.querySelectorAll('[data-quant-profile]').forEach(item=>item.classList.toggle('active',item===button));});
-  $('#quickQuantRun').onclick=viewQuickQuantRecommendation;
+  bindQuantDecisionInputs();
   $('#harnessWorkflow').onchange=event=>{state.harnessWorkflow=event.target.value;updateHarnessWorkflowFields();};
   $('#harnessRefreshButton').onclick=loadHarness;
   $('#harnessStartRun').onclick=async()=>{const button=$('#harnessStartRun');button.disabled=true;const workflow=state.harnessWorkflow;let input={};if(workflow==='stock_analysis')input={stocks:$('#harnessAgentStocks').value,profile:$('#harnessAgentProfile').value,research_query:$('#harnessResearchQuery').value};if(workflow==='quality_audit')input={stock_limit:Number($('#harnessAuditLimit').value)};if(workflow==='quant_portfolio')input={name:$('#quantName').value,capital:Number($('#quantCapital').value),horizon_months:Number($('#quantHorizon').value),target_return_pct:Number($('#quantTarget').value),max_drawdown_pct:Number($('#quantDrawdown').value),stop_loss_pct:Number($('#quantStopLoss').value),take_profit_pct:Number($('#quantTakeProfitPct').value),trailing_stop_pct:Number($('#quantTrailingStop').value),sectors:$('#quantSectors').value,stocks:$('#quantStocks').value,max_candidates:Number($('#quantCandidates').value),max_positions:Number($('#quantPositions').value),risk_profile:$('#quantRiskProfile').value,take_profit_mode:$('#quantTakeProfitMode').value,max_iterations:Number($('#quantIterations').value),refresh_data:true,collect_sentiment:true};if(workflow==='strategy_evolution')input={name:$('#strategyMandateName').value,capital:Number($('#strategyCapital').value),horizon_months:Number($('#strategyHorizon').value),target_return_pct:Number($('#strategyTarget').value),max_drawdown_pct:Number($('#strategyDrawdown').value),stocks:$('#strategyStocks').value,sectors:$('#strategySectors').value,max_positions:Number($('#strategyPositions').value),max_iterations:Number($('#strategyIterations').value),take_profit_mode:$('#strategyTakeProfit').value};if(workflow==='continuous_learning')input={phase:$('#learningPhase').value,stock_limit:Number($('#learningStockLimit').value),max_social_symbols:Number($('#learningSocialLimit').value),deep_epochs:Number($('#learningDeepEpochs').value),max_drawdown:Number($('#learningDrawdown').value)/100,refresh_data:$('#learningPhase').value!=='BACKFILL',collect_sentiment:true,train_deep_model:$('#learningDeep').checked,evolve_intraday:$('#learningIntraday').checked,evolve_source_code:$('#learningCode').checked,auto_promote:true,auto_promote_code:true};if(workflow==='strategy_activation')input={experiment_key:$('#strategyExperimentKey').value};if(workflow==='candidate_activation')input={candidate_id:Number($('#harnessCandidateId').value)};if(workflow==='version_rollback')input={version_key:$('#harnessRollbackVersion').value};try{const created=await request('/api/harness/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workflow,input,intent:$('#harnessAgentIntent').value,thread_key:$('#harnessContinueThread').checked?detail?.thread?.thread_key:null})});state.harnessRunKey=created.run.run_key;showToast('Harness 运行已创建');await loadHarness();}catch(error){showToast(`创建失败：${error.message}`);button.disabled=false;}};

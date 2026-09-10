@@ -35,3 +35,9 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Run recommendation display regression
         run: node runtime/tests/test_result_display.cjs
+      - name: Run recommendation availability regression
+        run: node runtime/tests/test_quant_availability.cjs
+      - name: Run local connection regression
+        run: node runtime/tests/test_local_connection.cjs
+      - name: Run forecast focus regression
+        run: node runtime/tests/test_forecast_focus.cjs

@@ -186,25 +186,27 @@ class ServerConcurrencyTests(unittest.TestCase):
         self.assertNotIn("/api/harness/runs", handler)
         self.assertNotIn("refresh_data", handler)
         self.assertNotIn("collect_sentiment", handler)
-        self.assertIn("quantDecisionOutputHtml(decision)", handler)
+        self.assertIn("renderQuantOutcome(decision)", handler)
         self.assertIn("output.scrollIntoView", handler)
         self.assertIn("output.focus", handler)
         self.assertIn("quantAllocationState(decision.result).blocked", handler)
         self.assertIn("即时多因子与K线预测", app_js)
         self.assertIn("stockForecastCurveSvg", app_js)
-        self.assertIn("样本外校准区间", app_js)
+        self.assertIn("历史样本外实测覆盖", app_js)
         self.assertNotIn("若已持有：未触发技术卖出复核", app_js)
         self.assertNotIn("投资条件已保存，盘后会自动补齐数据", handler)
         self.assertIn("LATEST_TRADING_DAY_SNAPSHOT", app_js)
         self.assertIn("最近交易日模型快照", app_js)
         self.assertNotIn("等待首次盘后策略解算", app_js)
 
-    def test_active_recommendation_poll_is_hourly_and_keeps_open_stock_profiles(self):
+    def test_background_poll_is_hourly_and_preserves_recommendation_inputs(self):
         app_js = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
         self.assertIn("const HARNESS_ACTIVE_POLL_MS=60*60*1000;", app_js)
-        self.assertIn("window.setTimeout(loadHarness,HARNESS_ACTIVE_POLL_MS)", app_js)
+        self.assertIn("window.setTimeout(loadHarnessDetails,HARNESS_ACTIVE_POLL_MS)", app_js)
+        self.assertIn("$('#harnessAdvanced')?.open", app_js)
+        self.assertIn("existingAdvanced.replaceWith(next)", app_js)
         self.assertNotIn("window.setTimeout(loadHarness,5000)", app_js)
         self.assertIn("details.stock-profile[open]", app_js)
         self.assertIn("details.open=Boolean(symbol&&openStockProfiles.has(symbol))", app_js)

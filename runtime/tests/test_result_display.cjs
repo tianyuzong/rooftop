@@ -29,10 +29,11 @@ const context=vm.createContext({
   localTimestamp:v=>v,quantVersionLabel:v=>v,
   quantTimeframeForecastHtml:()=>'<div>Individual forecasts</div>',quantTimeframeForecastDetailHtml:()=>'',
   portfolioFutureCurveSvg:()=>'<svg data-portfolio-curve></svg>',
-  $:selector=>controls[selector],state:{},quantDecisionInput:()=>({capital:100000}),
+  window:{setTimeout,clearTimeout},AbortController,
+  $:selector=>controls[selector],state:{quantRequestSerial:0},quantDecisionInput:()=>({capital:100000}),
   showToast:message=>events.push(message),request:async()=>({decision})
 });
-for(const name of ['quantAllocationState','quantDecisionSummary','quantResultHtml','quantDecisionOutputHtml','viewQuickQuantRecommendation'])vm.runInContext(extract(name),context);
+for(const name of ['quantAllocationState','quantDecisionSummary','quantResultHtml','quantDecisionOutputHtml','quantInputKey','quantRequest','quantReadStatus','renderQuantOutcome','viewQuickQuantRecommendation'])vm.runInContext(extract(name),context);
 
 (async()=>{
   const blocked=context.quantDecisionOutputHtml(decision);

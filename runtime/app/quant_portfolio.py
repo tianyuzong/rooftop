@@ -25,6 +25,8 @@ from typing import Any, Iterable
 from .charting import build_chart_series
 from .db import DATA_LAKE, connect, initialize
 from .strategy_evolution import (
+    ALLOCATION_POLICY,
+    PROFILE_POSITION_CAPS,
     DEFAULT_PREFERENCE_WEIGHTS,
     DEFAULT_EXECUTION,
     PREFERENCE_LABELS,
@@ -32,6 +34,7 @@ from .strategy_evolution import (
     STRATEGY_STYLES,
     _candidate_parameters,
     _load_aligned_universe,
+    _position_weights,
     _signal,
     run_strategy_evolution,
 )
@@ -390,6 +393,30 @@ def _published_decision(conn, mandate_row) -> dict:
             "order_execution": False,
         }
     result = _load(version_row["result_json"], {})
+    saved_parameters = result.get("recommendation", {}).get("parameters", {})
+    if (saved_parameters.get("max_position_pct") is not None
+            and saved_parameters.get("allocation_policy") != ALLOCATION_POLICY):
+        try:
+            try:
+                resized = _latest_trading_day_snapshot_result(mandate)
+            except Exception as exc:
+                resized = _cached_rule_snapshot_result(mandate, fallback_reason=str(exc))
+        except Exception:
+            # Keep the published historical result available if cached inputs are missing.
+            result["allocation_warning"] = "资金分配规则已更新；当前缓存不足，暂显示旧版历史结果，请稍后刷新"
+        else:
+            return {
+                "status": "AVAILABLE", "mandate": mandate,
+                "version": resized["version"], "result": resized,
+                "summary": _decision_summary(resized),
+                "data_asof": resized["recommendation"]["data_asof"],
+                "update_pending": bool(latest_run and latest_run["status"] == "RUNNING"),
+                "serving_previous_version": False, "latest_attempt": latest_attempt,
+                "snapshot_inference": True, "allocation_policy_updated": True,
+                "superseded_active_version": str(version_row["version_key"]),
+                "serving_policy": "CURRENT_ALLOCATION_PENDING_POST_CLOSE_VALIDATION",
+                "research_only": True, "order_execution": False,
+            }
     try:
         _ensure_recommendation_forecasts(result)
     except Exception as exc:
@@ -1861,6 +1888,7 @@ def _cached_rule_snapshot_result(mandate: dict,
     digest = hashlib.sha256(_dump({
         "mandate": _mandate_identity(request), "data_asof": data_asof,
         "kind": "cached_rule_snapshot", "profile": profile,
+        "allocation_policy": ALLOCATION_POLICY,
         "candidates": [item["symbol"] for item in candidates],
     }).encode("utf-8")).hexdigest()[:20]
     stamp = _now()
@@ -1971,7 +1999,7 @@ def _reference_strategy_template(request: dict, data_asof: str,
     params = dict(selected["parameters"])
     profile = selected["profile"]
     fundamental = PROFILE_RULES[profile]
-    profile_cap = {"aggressive": 0.60, "balanced": 0.45, "conservative": 0.35}[profile]
+    profile_cap = PROFILE_POSITION_CAPS[profile]
     params.update({
         "profile": profile,
         "stop_loss": request["stop_loss_pct"] / 100,
@@ -1979,7 +2007,8 @@ def _reference_strategy_template(request: dict, data_asof: str,
         "trailing_stop": request["trailing_stop_pct"] / 100,
         "take_profit_mode": request["take_profit_mode"],
         "max_positions": request["max_positions"],
-        "max_position_pct": round(min(profile_cap, 1 / request["max_positions"]), 4),
+        "max_position_pct": profile_cap,
+        "allocation_policy": ALLOCATION_POLICY,
         "risk_budget": round(min(float(params["risk_budget"]),
                                  request["max_drawdown_pct"] / 100), 4),
         "fundamental_weight": fundamental["fundamental_weight"],
@@ -2176,6 +2205,7 @@ def _latest_trading_day_snapshot_result(mandate: dict) -> dict:
     digest = hashlib.sha256(_dump({
         "mandate": _mandate_identity(request), "data_asof": data_asof,
         "model": model["version_key"], "reference": reference["version_key"],
+        "allocation_policy": ALLOCATION_POLICY,
         "profile": selected["profile"], "candidates": [item["symbol"] for item in candidates],
     }).encode("utf-8")).hexdigest()[:20]
     version = {
@@ -2571,21 +2601,22 @@ def _current_portfolio(mandate: dict, strategy: dict, candidates: list[dict],
             ),
         })
     ranked = sorted(rows, key=lambda item: item["composite_score"], reverse=True)
-    selected = (
-        [item for item in ranked if item["eligible"]][
-            :strategy["parameters"]["max_positions"]
-        ] if allocate_positions else []
+    eligible = [item for item in ranked if item["eligible"]] if allocate_positions else []
+    weights = _position_weights(
+        eligible, mandate["capital"], mandate["execution"]["lot_size"],
+        strategy["parameters"]["max_positions"], strategy["parameters"]["max_position_pct"],
     )
+    # Preserve zero-share candidates only when none can be funded, to explain the constraint.
+    selected = ([item for item in eligible if item["symbol"] in weights] if weights else
+                eligible[:strategy["parameters"]["max_positions"]])
     if selected:
-        inverse_vol = [1.0 / max(item["annual_volatility"], 0.08) for item in selected]
-        exposure = min(0.95, strategy["parameters"]["max_position_pct"] * len(selected))
-        total = sum(inverse_vol)
-        for item, raw in zip(selected, inverse_vol):
-            target_weight = min(strategy["parameters"]["max_position_pct"], exposure * raw / total)
+        for item in selected:
+            target_weight = weights.get(item["symbol"], 0.0)
             shares = math.floor(mandate["capital"] * target_weight /
-                                item["reference_price"] / mandate["execution"]["lot_size"]) * mandate["execution"]["lot_size"]
+                                item["reference_price"] / mandate["execution"]["lot_size"] + 1e-9) * mandate["execution"]["lot_size"]
             market_value = shares * item["reference_price"]
             item["shares"] = int(shares)
+            item["target_weight"] = round(target_weight, 6)
             item["weight"] = round(market_value / mandate["capital"], 6)
             item["amount"] = round(market_value, 2)
             item["stop_price"] = round(item["reference_price"] *
@@ -2604,6 +2635,9 @@ def _current_portfolio(mandate: dict, strategy: dict, candidates: list[dict],
             "rows": data["rows"], "raw_rows": data["raw_rows"],
         },
         "rules": {
+            "allocation_policy": ALLOCATION_POLICY,
+            "allocation_description": "最多持有只限制股票数量；金额按综合评分、波动和整手约束分配",
+            "max_position_pct": strategy["parameters"]["max_position_pct"],
             "stop_loss_pct": mandate["stop_loss_pct"],
             "take_profit_pct": mandate["take_profit_pct"],
             "trailing_stop_pct": mandate["trailing_stop_pct"],
@@ -2767,6 +2801,8 @@ def _version_quant_result(conn, mandate_id: int, run_id: int, result: dict) -> d
     same_snapshot = bool(previous and
         previous_result.get("data", {}).get("end") == result.get("data", {}).get("end") and
         previous_result.get("fundamental_time_policy") == result.get("fundamental_time_policy") and
+        previous_result.get("recommendation", {}).get("parameters", {}).get("allocation_policy") ==
+        recommendation.get("parameters", {}).get("allocation_policy") and
         previous_result.get("recommendation", {}).get("model_version") == recommendation.get("model_version") and
         [item["symbol"] for item in previous_result.get("candidates", [])] ==
         [item["symbol"] for item in result.get("candidates", [])])
@@ -3087,6 +3123,7 @@ def refresh_active_quant_portfolios(learning_cycle_id: int | None = None,
                     and saved.get("request")
                     and saved.get("checkpoint_model_version") == active_model_version
                     and saved.get("fundamental_time_policy") == VALUATION_TIME_POLICY
+                    and saved.get("recommendation", {}).get("parameters", {}).get("allocation_policy") == ALLOCATION_POLICY
                     and saved.get("data", {}).get("end") == cache_complete_asof
                     and _mandate_identity(normalize_quant_request(saved["request"]))
                     == _mandate_identity(normalize_quant_request(request))):

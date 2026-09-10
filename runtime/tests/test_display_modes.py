@@ -67,8 +67,9 @@ class ContentDisclosureContractTests(unittest.TestCase):
         self.assertIn("旧设置冲突时会自动收紧", self.app)
 
     def test_forecast_charts_prioritize_calibrated_horizon(self):
-        self.assertIn("hasReferenceTail?source.filter", self.app)
-        self.assertIn("精度优先：主图只显示通过滚动检验", self.app)
+        self.assertIn("item.validated===true", self.app)
+        self.assertIn("central_50_coverage_gate===true", self.app)
+        self.assertIn("主图聚焦最近通过检验的核心区间", self.app)
         self.assertIn("长期历史基准仅在专业表格显示", self.app)
         self.assertIn("不作为精确预测", self.app)
 

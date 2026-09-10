@@ -20,6 +20,57 @@ from typing import Any
 from .db import DATA_LAKE, connect, initialize
 
 
+ALLOCATION_POLICY = "score_volatility_lots_v2"
+PROFILE_POSITION_CAPS = {"aggressive": 0.60, "balanced": 0.45, "conservative": 0.35}
+
+
+def _position_weights(candidates: list[dict], capital: float, lot_size: int,
+                      max_positions: int, max_weight: float,
+                      exposure: float = 0.95) -> dict[str, float]:
+    """Size ranked entries by score and volatility, with independent count/capital caps."""
+    if capital <= 0 or max_positions <= 0 or max_weight <= 0 or exposure <= 0:
+        return {}
+    exposure = min(0.95, exposure)
+    max_weight = min(max_weight, exposure)
+    selected, minimums = [], []
+    for item in candidates:
+        if len(selected) >= max_positions:
+            break
+        price = float(item.get("reference_price") or 0)
+        minimum = price * lot_size / capital
+        if price <= 0 or minimum > max_weight + 1e-12:
+            continue
+        if sum(minimums) + minimum > exposure + 1e-12:
+            continue
+        selected.append(item)
+        minimums.append(minimum)
+    if not selected:
+        return {}
+    scores = [float(item.get("composite_score") or 0) for item in selected]
+    low, high = min(scores), max(scores)
+    raw = [
+        (0.75 + (0.5 if high <= low else (score - low) / (high - low)))
+        / max(0.08, float(item.get("annual_volatility") or 0.35))
+        for item, score in zip(selected, scores)
+    ]
+    weights = list(minimums)
+    remaining = max(0.0, exposure - sum(weights))
+    while remaining > 1e-12:
+        active = [i for i, weight in enumerate(weights) if max_weight - weight > 1e-12]
+        if not active:
+            break
+        total = sum(raw[i] for i in active)
+        additions = {i: min(max_weight - weights[i], remaining * raw[i] / total)
+                     for i in active}
+        applied = sum(additions.values())
+        if applied <= 1e-12:
+            break
+        for i, value in additions.items():
+            weights[i] += value
+        remaining -= applied
+    return {item["symbol"]: weight for item, weight in zip(selected, weights)}
+
+
 PROFILE_LABELS = {
     "aggressive": "激进",
     "balanced": "中立",
@@ -359,9 +410,8 @@ def _candidate_parameters(profile: str, mandate: dict, iteration: int) -> dict:
         "min_holding_days": base["min_holding_days"],
         "cooldown_days": base["cooldown_days"],
         "max_positions": max_positions,
-        "max_position_pct": round(min(1 / max_positions, {
-            "aggressive": 0.60, "balanced": 0.45, "conservative": 0.35,
-        }[profile]), 4),
+        "max_position_pct": PROFILE_POSITION_CAPS[profile],
+        "allocation_policy": ALLOCATION_POLICY,
         "prediction_weight": round((0.18, 0.24, 0.30, 0.36)[iteration % 4], 4),
         "prediction_floor": round((0.47, 0.49, 0.50)[iteration % 3], 4),
         "fundamental_weight": fundamental["fundamental_weight"],
@@ -704,13 +754,21 @@ def simulate_portfolio(data: dict, mandate: dict, params: dict,
             close_equity = cash + sum(
                 position["shares"] * float(data["bars"][symbol][index - 1]["close"])
                 for symbol, position in positions.items())
-            budget = close_equity * params["max_position_pct"]
-            for symbol in targets:
-                if len(positions) >= params["max_positions"] or symbol in positions:
-                    continue
-                if index < cooldown_until.get(symbol, -1):
-                    continue
-                buy(symbol, index, budget)
+            entries = [
+                {"symbol": symbol, "composite_score": signals[symbol]["score"],
+                 "annual_volatility": signals[symbol].get("annual_volatility"),
+                 "reference_price": float(data["bars"][symbol][index - 1]["close"])}
+                for symbol in ranked
+                if symbol not in positions and index >= cooldown_until.get(symbol, -1)
+            ]
+            available_exposure = max(0.0, cash / close_equity - 0.05) if close_equity > 0 else 0.0
+            weights = _position_weights(
+                entries, close_equity, execution["lot_size"],
+                params["max_positions"] - len(positions),
+                params["max_position_pct"], available_exposure,
+            )
+            for symbol, weight in weights.items():
+                buy(symbol, index, close_equity * weight)
 
         invested = 0.0
         for symbol, position in positions.items():

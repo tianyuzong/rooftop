@@ -10,6 +10,34 @@ from app.db import connect, initialize
 
 
 class QuantPortfolioTests(unittest.TestCase):
+    def test_weekend_registration_and_read_use_last_trading_day_cache(self):
+        from datetime import datetime, timezone
+        friday = "2026-09-04"
+        saturday = datetime(2026, 9, 5, 10, tzinfo=timezone.utc)
+        snapshot = self._published_result("weekend-cache", "最近交易日结果", friday)
+        snapshot["version"] = {"status": "SNAPSHOT", "version_key": "friday-cache"}
+        with tempfile.TemporaryDirectory() as folder:
+            db_path = Path(folder) / "weekend.db"
+            initialize(db_path)
+            with patch.multiple(
+                quant_portfolio, connect=lambda: connect(db_path),
+                initialize=lambda: initialize(db_path),
+            ), patch.object(quant_portfolio, "datetime", wraps=datetime) as clock, patch.object(
+                quant_portfolio, "_latest_trading_day_snapshot_result", return_value=snapshot,
+            ), patch.object(quant_portfolio, "_cached_candidate_asof", return_value=friday), patch.object(
+                quant_portfolio, "_refresh_daily",
+            ) as refresh:
+                clock.now.return_value = saturday
+                registered = quant_portfolio.register_quant_mandate(self._request())
+                loaded = quant_portfolio.resolve_quant_decision(self._request())
+            for decision in (registered["decision"], loaded):
+                self.assertEqual(decision["status"], "AVAILABLE")
+                self.assertEqual(decision["data_asof"], friday)
+                self.assertEqual(decision["version"]["status"], "SNAPSHOT")
+            self.assertFalse(registered["refresh_started"])
+            self.assertFalse(registered["backtest_started"])
+            refresh.assert_not_called()
+
     def test_versioning_republishes_changed_valuation_policy_and_audits_failed_gates(self):
         from copy import deepcopy
         from app.fundamentals import VALUATION_TIME_POLICY
@@ -1210,7 +1238,7 @@ class QuantPortfolioTests(unittest.TestCase):
                     "INSERT INTO harness_learning_cycles(cycle_key,cycle_date,phase,status,trigger_kind,"
                     "universe_json,started_at) VALUES('cycle','2026-09-04','POST_CLOSE','PARTIAL','test','[]','now')"
                 ).lastrowid
-                for index, key in enumerate(("finished", "changed", "other-cycle", "failed", "old-policy", "old-model")):
+                for index, key in enumerate(("finished", "changed", "other-cycle", "failed", "old-policy", "old-model", "old-allocation")):
                     current_request = {**request, "name": key, "capital": 100000 + index}
                     mandate = conn.execute(
                         "INSERT INTO quant_mandates(mandate_key,name,status,input_json,created_at,updated_at) "
@@ -1220,6 +1248,8 @@ class QuantPortfolioTests(unittest.TestCase):
                     if key == "changed":
                         saved_request["capital"] = 200000
                     saved = {"request": saved_request, "run_key": key,
+                             "recommendation": {"parameters": {"allocation_policy":
+                                 "legacy" if key == "old-allocation" else quant_portfolio.ALLOCATION_POLICY}},
                              "version": {"version_key": key}, "data": {"end": "2026-09-04"},
                              "fundamental_time_policy": "legacy" if key == "old-policy" else VALUATION_TIME_POLICY}
                     conn.execute(
@@ -1241,8 +1271,8 @@ class QuantPortfolioTests(unittest.TestCase):
                     learning_cycle_id=cycle, only_mandate_keys=["other-cycle", "failed"],
                 )
             self.assertEqual(result["reused"], 1)
-            self.assertEqual(result["updated"], 6)
-            self.assertEqual(set(seen), {"changed", "other-cycle", "failed", "old-policy", "old-model"})
+            self.assertEqual(result["updated"], 7)
+            self.assertEqual(set(seen), {"changed", "other-cycle", "failed", "old-policy", "old-model", "old-allocation"})
             self.assertFalse(result["errors"])
             finished = next(item for item in result["results"] if item["mandate_key"] == "finished")
             self.assertEqual(finished["version"]["version_key"], "finished")

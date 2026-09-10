@@ -174,6 +174,31 @@ def _client_ip(client_address) -> str:
     return str(getattr(parsed, "ipv4_mapped", None) or parsed)
 
 
+def _direct_local_browser(client_address, headers, port: int) -> bool:
+    """Trust only direct same-origin browser requests made on this computer."""
+    if headers.get("X-Argus-Local") != "1":
+        return False
+    try:
+        if not ipaddress.ip_address(_client_ip(client_address)).is_loopback:
+            return False
+    except ValueError:
+        return False
+    # Forwarded requests must continue through remote token authentication.
+    if any(name.lower() in {"forwarded", "x-real-ip", "via"}
+           or name.lower().startswith("x-forwarded-") for name in headers):
+        return False
+    hosts = headers.get_all("Host", [])
+    if len(hosts) != 1:
+        return False
+    host = hosts[0].lower()
+    if host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+        return False
+    origin = headers.get("Origin")
+    if origin is not None and origin.lower() != f"http://{host}":
+        return False
+    return headers.get("Sec-Fetch-Site", "same-origin") == "same-origin"
+
+
 def _allowed_csv(name: str) -> set[str]:
     return {item.strip().lower() for item in os.environ.get(name, "").split(",")
             if item.strip()}
@@ -1109,7 +1134,11 @@ class Handler(BaseHTTPRequestHandler):
             _audit_api(self.command, path, client_ip, "ORIGIN_REJECTED", "REJECTED")
             self._json({"error": "origin not allowed"}, HTTPStatus.FORBIDDEN)
             return False
-        status = _remote_auth_status(path, self.headers.get(REMOTE_TOKEN_HEADER))
+        local_browser = _direct_local_browser(
+            self.client_address, self.headers, self.server.server_port
+        )
+        status = (None if local_browser else
+                  _remote_auth_status(path, self.headers.get(REMOTE_TOKEN_HEADER)))
         if status is None:
             if mutation:
                 _audit_api(self.command, path, client_ip, "AUTHORIZED", "ACCEPTED")
