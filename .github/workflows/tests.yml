@@ -41,3 +41,7 @@ jobs:
         run: node runtime/tests/test_local_connection.cjs
       - name: Run forecast focus regression
         run: node runtime/tests/test_forecast_focus.cjs
+      - name: Run minute sync regression
+        run: node runtime/tests/test_minute_sync.cjs
+      - name: Run relative recommendation regression
+        run: node runtime/tests/test_relative_candidates.cjs

@@ -80,3 +80,15 @@ main{overflow-x:clip;overflow-y:visible}.signal-layout{align-items:start}.notifi
 .quant-funding-note{padding:16px;background:#152523;border:1px solid #35514b;border-radius:7px}.quant-funding-note strong{color:#b7ecd8}.quant-funding-note p{color:#a9c0c0;font-size:13px;line-height:1.8;margin:10px 0 0}
 
 .quant-availability{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:15px 0;padding:14px 16px;border:1px solid #315f54;border-radius:7px;background:#102a24}.quant-availability>div{display:grid;gap:7px;min-width:0}.quant-availability strong{color:#94e3c7;font-size:14px}.quant-availability span,.quant-availability small,.harness-details-status{color:#acc6c4;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.quant-availability small{color:#d8ce9f}.quant-availability button{flex-shrink:0}.harness-details-status{padding:16px}.harness-details-retry{margin:0 16px 16px}@media(max-width:700px){.quant-availability{align-items:flex-start;flex-direction:column}}
+
+.stock-forecast-chart .legend-median::before{width:8px;height:8px;border-radius:50%;background:#ffd166}.forecast-history{margin-top:12px}.forecast-history>summary{cursor:pointer;color:#9db2b8;padding:8px 0}
+
+.stock-forecast-chart .legend-median::before{width:21px;height:3px;border-radius:0;background:repeating-linear-gradient(90deg,#ffd166 0 7px,transparent 7px 11px)}
+.stock-forecast-chart .history-forecast-chart{height:auto;min-height:250px;max-height:380px}
+.history-forecast-chart .forecast-region{fill:#ffd166;fill-opacity:.035}
+.history-forecast-chart .forecast-envelope{fill:none;stroke:#ffd166;stroke-opacity:.5;stroke-width:1.2;stroke-dasharray:4 4}
+.history-forecast-chart .history-phase-title{fill:#67dfba;font-size:16px}
+.history-forecast-chart .forecast-phase-title{fill:#ffd166;font-size:16px}
+.history-forecast-chart .forecast-phase-date{fill:#9db2b8;font-size:12px}
+.history-forecast-chart .forecast-end-label{fill:#ffd166;font-size:13px}
+@media(max-width:840px){.stock-forecast-chart .history-forecast-chart text{font-size:14px}.stock-forecast-chart .history-forecast-chart .forecast-phase-date{font-size:12px}}

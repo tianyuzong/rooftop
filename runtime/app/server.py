@@ -38,6 +38,7 @@ from .harness import (active_config, approve_candidate, evaluate_candidate, gene
 from .harness_autonomy import run_autonomous_cycle
 from . import research_agent
 from .service_monitor import ServiceMonitor
+from .quote_sync import status_payload as quote_sync_status, write_status as write_quote_sync
 
 _service_monitor = None
 from .agent_harness import (cancel_run as cancel_harness_run,
@@ -481,10 +482,11 @@ def dashboard_payload():
                 "api_version": 2,
                 "as_of": latest_quote_at or latest_real or "2026-08-11",
                 "last_sync_at": latest_quote_capture_at,
+                "quote_sync": quote_sync_status(_a_share_session_open(), os.environ.get("ARGUS_LIVE_REFRESH_ENABLED", "1") == "1"),
                 "live_refresh_enabled": os.environ.get("ARGUS_LIVE_REFRESH_ENABLED", "1") == "1",
                 "market_session_open": _a_share_session_open(),
                 "tracked_symbols": int(tracked_symbols or 0),
-                "refresh_policy": "开盘日交易时段每60秒同步；闭市后停止分钟轮询，日线每日刷新",
+                "refresh_policy": "运行期间每60秒核对通达信报价；休市价格可能不变，查看的分钟图自动补齐",
                 "mode": "FREE_DELAYED_REALTIME" if latest_quote_at else ("LOCAL_REAL_WITH_DEMO_BENCHMARKS" if latest_real else "DEMO_OFFLINE"),
                 "warning": "A股大盘、ETF和个股使用免费公开行情并保存到本机；请根据页面显示的数据时间判断是否已经更新。海外市场数据仍可能是演示数据。系统不能下单。",
                 "fact_opinion_rule": "所有结论必须标记为事实、观点或待验证假设。",
@@ -612,8 +614,6 @@ def _refresh_market_asset_in_background(symbol: str) -> bool:
 
 def _asset_live_refresh_due(symbol: str, max_age_seconds: int = 55) -> bool:
     """Return whether the selected asset needs a non-blocking intraday refresh."""
-    if not _a_share_session_open():
-        return False
     symbol = normalize_symbol(symbol)
     try:
         with closing(connect()) as conn:
@@ -764,6 +764,7 @@ class MarketDataRefresher(threading.Thread):
         self.history_seconds = max(3600, int(os.environ.get("ARGUS_HISTORY_REFRESH_SECONDS", "86400")))
         self.stop_event = threading.Event()
         self.refresh_process = None
+        self.refresh_started = None
         self.daily_process = None
         self.history_process = None
 
@@ -809,7 +810,13 @@ class MarketDataRefresher(threading.Thread):
                                symbols: list[str] | None = None):
         """Keep native TDX work outside the Web interpreter and its GIL."""
         if self.refresh_process and self.refresh_process.poll() is None:
-            return False
+            if self.refresh_started is not None and time.monotonic() - self.refresh_started >= 50:
+                self.refresh_process.kill()
+                self.refresh_process.wait(timeout=3)
+                write_quote_sync(status="FAILED", last_result_status="FAILED", finished_at=datetime.now(timezone.utc).isoformat(),
+                                 errors=[{"error": "通达信行情请求超过50秒，下一分钟重试"}])
+            else:
+                return False
         log_path = DATA_LAKE / "logs" / "market_refresh.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         arguments = [sys.executable, "-m", "app.data_sources.market", "--no-history"]
@@ -817,15 +824,20 @@ class MarketDataRefresher(threading.Thread):
             arguments.append("--no-minute")
         if not include_daily:
             arguments.append("--no-daily")
+        if not include_minutes and not include_daily:
+            arguments.append("--quote-cycle")
         for symbol in (symbols or self._tracked_symbols()):
             arguments.extend(("--symbol", symbol))
         log = log_path.open("ab")
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
+            write_quote_sync(status="RUNNING", started_at=datetime.now(timezone.utc).isoformat(),
+                             requested_count=len(symbols or self._tracked_symbols()))
             self.refresh_process = subprocess.Popen(
                 arguments, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT,
                 creationflags=flags,
             )
+            self.refresh_started = time.monotonic()
         finally:
             log.close()
         return True
@@ -869,14 +881,15 @@ class MarketDataRefresher(threading.Thread):
         return True
 
     def run(self):
-        last_quote = 0.0
+        last_quote = None
         last_daily = 0.0
         last_history = 0.0
         while not self.stop_event.is_set():
             try:
                 now = time.monotonic()
-                session_open = _a_share_session_open()
-                include_quotes = session_open and now - last_quote >= self.minute_seconds
+                # Keep checking the source every minute, including the final
+                # close and corrections published after the trading session.
+                include_quotes = last_quote is None or now - last_quote >= self.minute_seconds
                 include_daily = now - last_daily >= self.daily_seconds
                 include_history = now - last_history >= self.history_seconds
                 symbols = self._tracked_symbols()
@@ -1323,6 +1336,13 @@ class Handler(BaseHTTPRequestHandler):
                                 "daily_sync": sync_status})
                 else:
                     self._json({"error": str(exc), "semantic": semantic_status()}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if parsed.path == "/api/market-sync":
+            session_open = _a_share_session_open()
+            enabled = os.environ.get("ARGUS_LIVE_REFRESH_ENABLED", "1") == "1"
+            self._json({"market_session_open": session_open,
+                        "live_refresh_enabled": enabled,
+                        "quote_sync": quote_sync_status(session_open, enabled)})
             return
         if parsed.path == "/api/dashboard":
             self._json(dashboard_payload())

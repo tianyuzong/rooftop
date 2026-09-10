@@ -1,0 +1,28 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(require('node:path').join(__dirname,'../app/static/app.js'),'utf8');
+const block=source.slice(source.indexOf('async function refreshRealtimeOverview(){'),source.indexOf('function renderDiscipline('));
+let negative=false,calls=0;
+const label={textContent:'',classList:{toggle:(name,value)=>{negative=value;},add:()=>{negative=true;}}};
+const meta={live_refresh_enabled:true,market_session_open:true,quote_sync:{status:'HEALTHY',last_success_at:'2026-09-10T02:30:00Z'}};
+const context={state:{dashboard:{}},document:{hidden:false,querySelector:()=>null},$:()=>label,localTimestamp:x=>x,normalizeDashboard:x=>x,request:async()=>{calls++;return {meta};},console};
+vm.createContext(context);vm.runInContext(block,context);
+(async()=>{
+  await context.refreshRealtimeOverview();
+  assert.equal(calls,1,'harness and other pages must also poll sync state');
+  assert.match(label.textContent,/通达信盘中每分钟同步/);assert.equal(negative,false);
+  assert.match(label.textContent,/当前时间/);
+  const originalSuccess=meta.quote_sync.last_success_at;
+  context.request=async(path)=>{assert.equal(path,'/api/market-sync');return meta;};
+  await context.refreshMarketSyncStatus();
+  assert.equal(context.state.dashboard.meta.quote_sync.last_success_at,originalSuccess,'clock must not fabricate successful sync time');
+  meta.quote_sync.status='FAILED';context.renderMarketSyncState(meta);
+  assert.match(label.textContent,/同步异常/);assert.equal(negative,true);
+  meta.quote_sync={status:'PARTIAL',received_count:60,requested_count:100};context.renderMarketSyncState(meta);
+  assert.match(label.textContent,/60\/100/);
+  meta.quote_sync.status='STALE';context.renderMarketSyncState(meta);assert.equal(negative,true);
+  meta.market_session_open=false;meta.quote_sync.status='CLOSED';context.renderMarketSyncState(meta);
+  assert.match(label.textContent,/每分钟核对/);assert.equal(negative,false);
+  context.request=async()=>{throw Error('offline');};await context.refreshRealtimeOverview();
+  assert.match(label.textContent,/无法读取同步状态/);assert.equal(negative,true);
+  console.log('Minute sync UI tests passed');
+})().catch(e=>{console.error(e);process.exitCode=1;});

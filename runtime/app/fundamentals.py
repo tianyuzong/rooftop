@@ -349,4 +349,6 @@ def fundamental_snapshot(timelines: dict, symbol: str, signal_date: str,
                           ("model_key", "name", "version", "scope_type", "scope_value")},
         },
         "fundamental_weight": rules["fundamental_weight"],
+        "minimum_score": rules["minimum_score"],
+        "minimum_coverage": rules["minimum_coverage"],
     }

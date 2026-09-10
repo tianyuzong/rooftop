@@ -1,9 +1,8 @@
 """Zero-account A-share real-time and intraday market-data pipeline.
 
-Tencent's public quote pages are the first online source.  A narrowly scoped
-Eastmoney request is the second online source.  Both are unofficially exposed
-web interfaces rather than contractual APIs, so every response is persisted,
-validated, and served from SQLite.  The web application never waits on an
+TDX public TCP quotes are the default source. Tencent and Eastmoney remain
+explicit mixed-mode alternatives. Every response is persisted, validated,
+and served from SQLite.  The web application never waits on an
 upstream website and never imports a trading function.
 """
 
@@ -158,7 +157,9 @@ def _tdx_quote_item(symbol: str, row: dict, name: str | None = None) -> dict:
     item = {
         "symbol": normalize_symbol(symbol),
         "name": name or normalize_symbol(symbol),
-        "observed_at": _tdx_observed_at(row.get("servertime")),
+        "observed_at": row.get("_received_at") or _tdx_observed_at(row.get("servertime")),
+        "time_basis": "RECEIVED_AT" if row.get("_received_at") else "SERVER_CLOCK",
+        "server_clock_raw": row.get("servertime"),
         "price": price,
         "previous_close": previous_close,
         "open": _float(row.get("open")),
@@ -177,16 +178,27 @@ def _tdx_quote_item(symbol: str, row: dict, name: str | None = None) -> dict:
 
 
 def _tdx_fetch_quote_group(instruments: list[tuple[str, int, str]], fund_mode: bool) -> tuple[list[dict], str]:
-    from tdxrs import TdxHqClient, TdxHqFundClient
+    from .tdx_public import PublicQuoteClient
 
     last_error = None
     for host, port in TDX_PUBLIC_SERVERS:
-        client = TdxHqFundClient() if fund_mode else TdxHqClient()
+        client = PublicQuoteClient()
         try:
-            client.connect(host, port, timeout=6)
+            client.connect(host, port, time_out=3)
             pairs = [(market, code) for _symbol, market, code in instruments]
-            rows = client.get_fund_quotes(pairs) if fund_mode else client.get_security_quotes(pairs)
+            rows = client.get_security_quotes(pairs)
             if rows:
+                # The old parser's server-clock field is not a dated exchange
+                # timestamp (fund/index encodings also differ). Mark the actual
+                # receipt time explicitly instead of inventing a trade time.
+                for row in rows:
+                    row["_received_at"] = datetime.now(SHANGHAI).isoformat()
+                # The wire quote price is in 0.001 yuan for funds, while
+                # pytdx's generic parser divides every instrument by 100.
+                if fund_mode:
+                    for row in rows:
+                        for field in ("price", "last_close", "open", "high", "low"):
+                            row[field] = round(row[field] / 10, 3)
                 return list(rows), f"{host}:{port}"
             raise ValueError("TDX returned no quotes")
         except Exception as exc:
@@ -208,24 +220,28 @@ def fetch_tdx_quotes(symbols: Iterable[str], names: dict[str, str] | None = None
         groups[is_fund].append((symbol, market, code))
     results = []
     servers = []
+    errors = []
     for fund_mode, instruments in groups.items():
-        if not instruments:
-            continue
-        try:
-            rows, server = _tdx_fetch_quote_group(instruments, fund_mode)
-        except RuntimeError:
-            if not fund_mode:
-                raise
-            rows, server = _tdx_fetch_quote_group(instruments, False)
-        servers.append(server)
-        by_code = {str(row.get("code")): row for row in rows}
-        for symbol, _market, code in instruments:
-            row = by_code.get(code)
-            if row:
-                results.append(_tdx_quote_item(symbol, row, names.get(symbol)))
+        for offset in range(0, len(instruments), 60):
+            batch = instruments[offset:offset + 60]
+            try:
+                rows, server = _tdx_fetch_quote_group(batch, fund_mode)
+                servers.append(server)
+                # Shanghai index 000001 and Shenzhen stock 000001 must not
+                # collide when returned in the same quote batch.
+                by_code = {(int(row["market"]), str(row["code"])): row for row in rows}
+                for symbol, market, code in batch:
+                    row = by_code.get((market, code))
+                    if row:
+                        try:
+                            results.append(_tdx_quote_item(symbol, row, names.get(symbol)))
+                        except ValueError as exc:
+                            errors.append(str(exc))
+            except RuntimeError as exc:
+                errors.append(str(exc))
     if not results:
-        raise ValueError("TDX returned no valid requested quotes")
-    raw = json.dumps({"provider": "tdx_public", "servers": servers, "quotes": results},
+        raise ValueError(f"TDX returned no valid requested quotes: {errors}")
+    raw = json.dumps({"provider": "tdx_public", "servers": servers, "quotes": results, "errors": errors},
                      ensure_ascii=False).encode("utf-8")
     return results, raw
 
@@ -295,53 +311,46 @@ def fetch_tdx_current_minutes(symbol: str) -> tuple[list[dict], bytes]:
 
 
 def fetch_tdx_recent_minutes(symbol: str, trading_days: int = 5) -> tuple[list[dict], bytes]:
-    from tdxrs import TdxHqClient, TdxHqFundClient
-    from tdxrs.constants import KLINE_DAILY
+    """Fetch native one-minute OHLC bars using the public quote session."""
+    from .tdx_public import PublicQuoteClient
 
     symbol = normalize_symbol(symbol)
-    code, market, _is_index, is_fund = _tdx_instrument(symbol)
-    modes = ("fund", "security") if is_fund else ("security",)
-    trading_days = max(1, min(int(trading_days), 10))
+    code, market, is_index, _is_fund = _tdx_instrument(symbol)
+    count = max(1, min(int(trading_days), 10)) * 240
     last_error = None
     for host, port in TDX_PUBLIC_SERVERS:
-        for mode in modes:
-            client = TdxHqFundClient() if mode == "fund" else TdxHqClient()
-            try:
-                client.connect(host, port, timeout=6)
-                daily = (client.get_fund_bars(KLINE_DAILY, market, code, 0, trading_days)
-                         if mode == "fund" else
-                         client.get_security_bars(KLINE_DAILY, market, code, 0, trading_days, 0))
-                dates = sorted({str(bar["datetime"])[:10] for bar in daily})[-trading_days:]
-                if not dates:
-                    raise ValueError("TDX returned no trading dates for minute history")
-                rows = []
-                raw_days = []
-                for trade_date in dates:
-                    date_value = int(trade_date.replace("-", ""))
-                    if trade_date == dates[-1]:
-                        points = (client.get_fund_minute_time_data(market, code) if mode == "fund"
-                                  else client.get_minute_time_data(market, code))
-                    else:
-                        points = (client.get_fund_history_minute_time_data(market, code, date_value)
-                                  if mode == "fund" else
-                                  client.get_history_minute_time_data(market, code, date_value))
-                    day_rows = _tdx_time_rows(symbol, trade_date, points)
-                    if day_rows:
-                        rows.extend(day_rows)
-                        raw_days.append({"trade_date": trade_date, "points": list(points)})
-                if not rows:
-                    raise ValueError("TDX returned no valid recent minute points")
-                raw = json.dumps({"provider": "tdx_public", "server": f"{host}:{port}",
-                                  "mode": mode, "days": raw_days}, ensure_ascii=False).encode("utf-8")
-                return rows, raw
-            except Exception as exc:
-                last_error = exc
-            finally:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
-    raise RuntimeError(f"all TDX public nodes failed for recent minutes {symbol}: {last_error!r}")
+        client = PublicQuoteClient()
+        try:
+            client.connect(host, port, time_out=3)
+            collected = {}
+            pages = []
+            observed = datetime.now(SHANGHAI)
+            for offset in range(0, count, 800):
+                method = client.get_index_bars if is_index else client.get_security_bars
+                page = method(8, market, code, offset, min(800, count - offset))
+                if not page:
+                    break
+                pages.append(page)
+                for bar in page:
+                    when = _tdx_observable_bar_time(bar['datetime'], observed)
+                    if when and float(bar.get('close') or 0) > 0:
+                        collected[when] = {
+                            'symbol': symbol, 'bar_time': when, 'interval_minutes': 1,
+                            **{key: float(bar[key]) for key in ('open', 'high', 'low', 'close')},
+                            'volume': float(bar.get('vol') or 0),
+                            'amount': float(bar.get('amount') or 0),
+                            'bar_kind': 'OHLC', 'source': 'tdx_public',
+                        }
+            if not collected:
+                raise ValueError('TDX returned no observable minute bars')
+            raw = json.dumps({'provider': 'tdx_public', 'server': f'{host}:{port}',
+                              'interval_minutes': 1, 'pages': pages}, ensure_ascii=False).encode('utf-8')
+            return [collected[key] for key in sorted(collected)], raw
+        except Exception as exc:
+            last_error = exc
+        finally:
+            client.disconnect()
+    raise RuntimeError(f'all TDX public nodes failed for recent minutes {symbol}: {last_error!r}')
 
 
 def fetch_tdx_daily(symbol: str, count: int = 1000) -> tuple[list[dict], bytes]:
@@ -884,6 +893,9 @@ def _refresh_tdx_market_data(symbols: list[str], include_minutes: bool,
         quotes, raw = fetch_tdx_quotes(symbols, _cached_names(symbols))
         result["quotes"].append(_write_quotes(quotes, raw, "tdx_public"))
         received.update(item["symbol"] for item in quotes)
+        missing = sorted(set(symbols) - received)
+        if missing:
+            raise ValueError(f"TDX quote batch incomplete; missing {','.join(missing)}")
     except Exception as exc:
         _mark_failure("tdx_public", "realtime_quotes", ",".join(symbols), started, exc)
         result["errors"].append({"source": "tdx_public", "dataset": "quotes", "error": repr(exc)})
@@ -1070,13 +1082,32 @@ def main() -> int:
     parser.add_argument("--no-daily", action="store_true")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--watch", action="store_true", help="keep refreshing; intended for a separate local process")
+    parser.add_argument("--quote-cycle", action="store_true", help="record minute batch status independently")
     parser.add_argument("--poll-seconds", type=int, default=60)
     args = parser.parse_args()
     symbols = args.symbol or list(DEFAULT_SYMBOLS)
     while True:
-        result = refresh_market_data(symbols, include_minutes=not args.no_minute,
-                                     include_daily=not args.no_daily,
-                                     include_history=not args.no_history)
+        try:
+            result = refresh_market_data(symbols, include_minutes=not args.no_minute,
+                                         include_daily=not args.no_daily,
+                                         include_history=not args.no_history)
+        except Exception as exc:
+            if args.quote_cycle:
+                from ..quote_sync import write_status
+                write_status(status="FAILED", last_result_status="FAILED", finished_at=utc_now(),
+                             errors=[{"error": str(exc)}])
+            raise
+        if args.quote_cycle:
+            from ..quote_sync import write_status
+            count = sum(item["rows"] for item in result["quotes"])
+            success = count == len(set(symbols)) and not result["errors"]
+            fields = {"status": "HEALTHY" if success else ("PARTIAL" if count else "FAILED"),
+                      "finished_at": utc_now(), "received_count": count,
+                      "requested_count": len(set(symbols)), "errors": result["errors"]}
+            if success:
+                fields["last_success_at"] = fields["finished_at"]
+            fields["last_result_status"] = fields["status"]
+            write_status(**fields)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if not args.watch:
             return 0 if result["status"] != "FAILED" else 2

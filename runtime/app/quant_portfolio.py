@@ -33,6 +33,7 @@ from .strategy_evolution import (
     PROFILE_LABELS,
     STRATEGY_STYLES,
     _candidate_parameters,
+    apply_screening_relaxation,
     _load_aligned_universe,
     _position_weights,
     _signal,
@@ -181,6 +182,7 @@ def normalize_quant_request(inputs: dict) -> dict:
         "max_iterations": iterations,
         "take_profit_mode": take_profit_mode,
         "risk_profile": profile,
+        "screening_relaxation": _number(inputs.get("screening_relaxation", 0), "筛选宽松度", 0, 100),
         "backtest_window_years": backtest_window_years,
         "strategy_style": strategy_style,
         "preference_weights": weights,
@@ -287,7 +289,65 @@ def _decision_summary(result: dict) -> str:
     return f"{label}：{profile}档，当前建议 {len(positions)} 只股票，预期收益中位数 {p50:.1f}%"
 
 
+def _with_relative_candidates(decision: dict) -> dict:
+    """Surface research ranking independently of funded portfolio eligibility.
+
+    Relative ranking does not turn a failed signal into a passed signal, nor
+    does an affordable minimum lot allocate the user's capital.
+    """
+    result = decision.get("result") or {}
+    rec = result.get("recommendation") or {}
+    funded = rec.get("positions", []) + rec.get("research_recommendations", [])
+    request = result.get("request") or (decision.get("mandate") or {}).get("input", {})
+    ranking = rec.get("candidate_ranking") or []
+    ranked = [item for item in ranking if item.get("composite_score") is not None
+              and math.isfinite(float(item["composite_score"]))]
+    ranked.sort(key=lambda item: (-float(item["composite_score"]), str(item["symbol"])))
+    if not ranked:
+        return decision
+    capital = float(request.get("capital") or 0)
+    execution = request.get("execution") or {}
+    lot = int(execution.get("lot_size") or 100)
+    limit = max(1, min(8, int(request.get("max_positions") or 3)))
+    rows = []
+    for index, item in enumerate(ranked, 1):
+        price = float(item.get("reference_price") or 0)
+        amount = price * lot
+        cost = amount * (1 + float(execution.get("slippage_rate", .001)))
+        cost += max(float(execution.get("minimum_commission", 5)),
+                    cost * float(execution.get("commission_rate", .0003)))
+        rows.append({
+            "symbol": item["symbol"], "name": item.get("name") or item["symbol"],
+            "relative_rank": index, "composite_score": item["composite_score"],
+            "probability_up": item.get("probability_up"),
+            "momentum": item.get("momentum"), "fundamental_score": item.get("fundamental_score"),
+            "blockers": list(item.get("rejection_reasons") or []),
+            "screening_passed": bool(item.get("eligible")),
+            "reference_price": price, "minimum_lot_shares": lot,
+            "minimum_lot_cost": round(cost, 2) if price > 0 else None,
+            "capital_affordable": bool(price > 0 and cost <= capital),
+            "observation_only": True, "formal_position": False,
+        })
+    rec["relative_recommendations"] = rows[:limit]
+    rec["affordable_relative_recommendations"] = sorted(
+        (item for item in rows if item["capital_affordable"]),
+        key=lambda item: (not item["screening_passed"], item["relative_rank"]),
+    )[:limit]
+    rec["relative_candidate_count"] = len(ranked)
+    rec["screening_passed_count"] = sum(bool(item.get("eligible")) for item in ranked)
+    rec["screening_relaxation"] = request.get("screening_relaxation", 0)
+    rec["relative_selection_rule"] = "在本次有评分的候选中按综合分从高到低排序；不以通过门槛或试探仓位上限为入榜条件"
+    preferred = rec["affordable_relative_recommendations"] or rows[:limit]
+    names = "、".join(item["name"] for item in preferred[:3])
+    decision["summary"] = f"已比较 {len(ranked)} 只候选；" + ("本金可覆盖的优先研究名单：" if rec["affordable_relative_recommendations"] else "暂无本金可覆盖的候选，观察名单：") + names + "。仓位方案单独评估，不影响研究排名。"
+    return decision
+
+
 def _published_decision(conn, mandate_row) -> dict:
+    return _with_relative_candidates(_base_published_decision(conn, mandate_row))
+
+
+def _base_published_decision(conn, mandate_row) -> dict:
     mandate = {
         "id": int(mandate_row["id"]),
         "mandate_key": str(mandate_row["mandate_key"]),
@@ -1055,8 +1115,8 @@ def _cached_candidate_asof(request: dict, minimum_history_days: int = 420) -> st
         dict(item) for item in candidates
         if not re.search(r"(?:\*?ST|退)", item["name"], re.IGNORECASE)
     ]
-    if len(candidates) < request["max_positions"]:
-        raise RuntimeError("缓存中的候选股票少于设置的最大持仓数")
+    if not candidates:
+        raise RuntimeError("缓存中没有匹配的候选股票")
     symbols = [item["symbol"] for item in candidates]
     placeholders = ",".join("?" for _ in symbols)
     with closing(connect()) as conn:
@@ -1075,7 +1135,7 @@ def _cached_candidate_asof(request: dict, minimum_history_days: int = 420) -> st
         date_counts[key] = date_counts.get(key, 0) + 1
     eligible_dates = [
         key for key, count in date_counts.items()
-        if count >= request["max_positions"]
+        if count >= 1
     ]
     if not eligible_dates:
         ready = max(date_counts.values(), default=0)
@@ -1100,8 +1160,8 @@ def _cached_candidate_pool(request: dict, data_asof: str,
         dict(item) for item in candidates
         if not re.search(r"(?:\*?ST|退)", item["name"], re.IGNORECASE)
     ]
-    if len(candidates) < request["max_positions"]:
-        raise RuntimeError("缓存中符合条件的候选股票少于最大持仓数")
+    if not candidates:
+        raise RuntimeError("缓存中没有符合条件的候选股票")
     symbols = [item["symbol"] for item in candidates]
     placeholders = ",".join("?" for _ in symbols)
     with closing(connect()) as conn:
@@ -1149,8 +1209,8 @@ def _cached_candidate_pool(request: dict, data_asof: str,
         key=lambda item: (float(item["liquidity_amount"]), item["symbol"]),
         reverse=True,
     )
-    selected = eligible[:request["max_candidates"]]
-    if len(selected) < request["max_positions"]:
+    selected = eligible
+    if not selected:
         raise RuntimeError(
             f"截至 {data_asof} 只有 {len(selected)} 只候选股具备完整缓存，无法构建 "
             f"{request['max_positions']} 只持仓的快照推荐"
@@ -1769,6 +1829,7 @@ def _cached_rule_snapshot_result(mandate: dict,
         "backtest_window_years": request["backtest_window_years"],
         "strategy_style": request["strategy_style"],
         "preference_weights": request["preference_weights"],
+        "screening_relaxation": request.get("screening_relaxation", 0),
         "preference_version": request["preference_version"],
         "execution": request["execution"],
     }
@@ -2027,7 +2088,7 @@ def _reference_strategy_template(request: dict, data_asof: str,
             "strategy_style_description": style["plain_description"],
             "style_multipliers": dict(style["multipliers"]),
         })
-    selected["parameters"] = params
+    selected["parameters"] = apply_screening_relaxation(params, request.get("screening_relaxation", 0))
     selected["label"] = PROFILE_LABELS[profile]
     return {
         "strategy": selected,
@@ -2081,6 +2142,7 @@ def _latest_trading_day_snapshot_result(mandate: dict) -> dict:
         "backtest_window_years": request["backtest_window_years"],
         "strategy_style": request["strategy_style"],
         "preference_weights": request["preference_weights"],
+        "screening_relaxation": request.get("screening_relaxation", 0),
         "preference_version": request["preference_version"],
         "execution": request["execution"],
     }
@@ -2894,6 +2956,7 @@ def run_quant_portfolio(inputs: dict, normalized: bool = False, trigger_kind: st
             "backtest_window_years": request["backtest_window_years"],
             "strategy_style": request["strategy_style"],
             "preference_weights": request["preference_weights"],
+        "screening_relaxation": request.get("screening_relaxation", 0),
             "preference_version": request["preference_version"],
             "execution": request["execution"],
             "target_semantics": "soft_objective_not_guarantee",

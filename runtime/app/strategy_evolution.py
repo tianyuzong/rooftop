@@ -293,6 +293,7 @@ def normalize_mandate(inputs: dict) -> dict:
         "backtest_window_years": backtest_window_years,
         "strategy_style": strategy_style,
         "preference_weights": preferences,
+        "screening_relaxation": _bounded_number(inputs.get("screening_relaxation", 0), "筛选宽松度", 0, 100),
         "execution": execution,
         "target_semantics": "soft_objective_not_guarantee",
         "risk_semantics": "hard_maximum_peak_to_trough_drawdown",
@@ -351,6 +352,21 @@ def _load_aligned_universe(mandate: dict, data_asof: str | None = None,
     }
 
 
+def apply_screening_relaxation(params: dict, value: float = 0) -> dict:
+    """Relax entry signals only; retain the original floor for idempotent reuse."""
+    result = dict(params)
+    level = _bounded_number(value, "筛选宽松度", 0, 100)
+    ratio = level / 100
+    baseline = float(result.get("screening_base_prediction_floor", result.get("prediction_floor", 0)))
+    result.update({"screening_relaxation": level,
+                   "screening_base_prediction_floor": baseline,
+                   "prediction_floor": round(max(0, baseline - .15 * ratio), 4),
+                   "trend_tolerance": .10 * ratio,
+                   "momentum_tolerance": .20 * ratio,
+                   "fundamental_score_tolerance": .30 * ratio})
+    return result
+
+
 def _candidate_parameters(profile: str, mandate: dict, iteration: int) -> dict:
     from .fundamentals import PROFILE_RULES
 
@@ -395,7 +411,7 @@ def _candidate_parameters(profile: str, mandate: dict, iteration: int) -> dict:
     style = STRATEGY_STYLES[style_key]
     custom_preferences = mandate.get("preference_weights") or {}
     preference_weights = dict(custom_preferences or DEFAULT_PREFERENCE_WEIGHTS[profile])
-    return {
+    return apply_screening_relaxation({
         "profile": profile,
         "fast_window": fast,
         "slow_window": slow,
@@ -425,7 +441,7 @@ def _candidate_parameters(profile: str, mandate: dict, iteration: int) -> dict:
         "style_multipliers": dict(style["multipliers"]),
         "preference_weights": preference_weights,
         "custom_preferences": bool(custom_preferences),
-    }
+    }, mandate.get("screening_relaxation", 0))
 
 
 def _signal(data: dict, symbol: str, index: int, params: dict) -> dict:
@@ -460,6 +476,12 @@ def _signal(data: dict, symbol: str, index: int, params: dict) -> dict:
     # Empty databases remain usable for isolated/synthetic tests. Once a
     # fundamental dataset exists, missing coverage is explicit and blocks entry.
     fundamental_pass = (not timelines.get("has_data") or fundamental["eligible"])
+    if params.get("screening_relaxation", 0) > 0 and timelines.get("has_data"):
+        minimum = float(fundamental.get("minimum_score", params.get("fundamental_minimum_score", 0)))
+        coverage_minimum = float(fundamental.get("minimum_coverage", params.get("fundamental_minimum_coverage", 1)))
+        fundamental_pass = (fundamental.get("score") is not None and
+                            float(fundamental.get("coverage", 0)) >= coverage_minimum and
+                            float(fundamental["score"]) >= minimum - params.get("fundamental_score_tolerance", 0))
     fundamental_score = (-1.0 if timelines.get("has_data") and
                          fundamental.get("score") is None else
                          float(fundamental.get("score") or 0.0))
@@ -497,16 +519,18 @@ def _signal(data: dict, symbol: str, index: int, params: dict) -> dict:
                       abs(weighted["fundamental"]))
     model_pass = (model_probability is None or
                   float(model_probability) >= params.get("prediction_floor", 0.0))
+    trend_pass = (previous_close > slow_ma * (1 - params.get("trend_tolerance", 0)) and
+                  fast_ma > slow_ma * (1 - params.get("trend_tolerance", 0)) and
+                  momentum > -params.get("momentum_tolerance", 0))
     reasons = []
-    if not (previous_close > slow_ma and fast_ma > slow_ma and momentum > 0):
+    if not trend_pass:
         reasons.append("趋势或动量未通过")
     if not model_pass:
         reasons.append("在线模型上涨概率未通过")
     if not fundamental_pass:
         reasons.extend(fundamental.get("reasons") or ["基本面门禁未通过"])
     return {
-        "eligible": (previous_close > slow_ma and fast_ma > slow_ma and momentum > 0 and
-                     model_pass and fundamental_pass),
+        "eligible": (trend_pass and model_pass and fundamental_pass),
         "score": score,
         "momentum": momentum,
         "trend": trend,

@@ -1445,7 +1445,7 @@ def scheduled_cycle_request(now: datetime | None = None) -> dict | None:
     retry_age = (_timestamp_age_seconds(today_post["finished_at"], current)
                  if today_post and today_post["finished_at"] else None)
     retry_due = not today_post or retry_age is None or retry_age >= retry_minutes * 60
-    if (is_trading_day(current.date()) and minutes >= 18 * 60 and
+    if (is_trading_day(current.date()) and minutes >= 15 * 60 + 1 and
             not post_complete and retry_due):
         return {"phase": "POST_CLOSE", "cycle_date": current.date().isoformat(),
                 "trigger_kind": "scheduler", "stock_limit": len(symbols),

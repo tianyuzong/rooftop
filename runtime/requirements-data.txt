@@ -2,3 +2,4 @@
 akshare==1.18.84
 baostock==0.9.3
 tdxrs==0.6.7
+pytdx==1.72

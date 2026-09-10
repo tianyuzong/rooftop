@@ -254,6 +254,24 @@ class ContinuousLearningTests(unittest.TestCase):
                 self.assertFalse(continuous_learning.is_trading_day(date(2026, 5, 1)))
                 self.assertTrue(continuous_learning.is_trading_day(date(2026, 5, 6)))
 
+    def test_post_close_starts_at_1501_and_skips_nontrading_days(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "test.db"
+            initialize(path)
+            with self._patch_db(path), patch.object(
+                continuous_learning, "learning_universe", return_value=["600519"]
+            ), patch.object(
+                continuous_learning, "_latest_data_date", return_value="2026-09-10"
+            ), patch.object(continuous_learning, "is_trading_day", return_value=True) as trading:
+                before = continuous_learning.datetime.fromisoformat("2026-09-10T15:00:00+08:00")
+                after = continuous_learning.datetime.fromisoformat("2026-09-10T15:01:00+08:00")
+                self.assertIsNone(continuous_learning.scheduled_cycle_request(before))
+                request = continuous_learning.scheduled_cycle_request(after)
+                self.assertEqual(request["phase"], "POST_CLOSE")
+                self.assertTrue(request["retry_if_stale"])
+                trading.return_value = False
+                self.assertIsNone(continuous_learning.scheduled_cycle_request(after))
+
     def test_scheduler_retries_stale_post_close_cycle_after_retry_window(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.db"

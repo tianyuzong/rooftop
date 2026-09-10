@@ -69,9 +69,9 @@ class ContentDisclosureContractTests(unittest.TestCase):
     def test_forecast_charts_prioritize_calibrated_horizon(self):
         self.assertIn("item.validated===true", self.app)
         self.assertIn("central_50_coverage_gate===true", self.app)
-        self.assertIn("主图聚焦最近通过检验的核心区间", self.app)
+        self.assertIn("左侧历史、右侧预测，共用价格纵轴", self.app)
         self.assertIn("长期历史基准仅在专业表格显示", self.app)
-        self.assertIn("不作为精确预测", self.app)
+        self.assertIn("连线与色带边缘只连接已检验节点，不代表逐日预测", self.app)
 
 
 if __name__ == "__main__":

@@ -311,15 +311,16 @@ class ServerConcurrencyTests(unittest.TestCase):
         self.assertIn("--no-daily", arguments)
         self.assertNotIn("--no-minute", arguments)
 
-    def test_selected_asset_refresh_is_due_only_during_session(self):
+    def test_selected_asset_refresh_catches_up_after_close(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.db"
             initialize(path)
             with patch.object(server, "connect", lambda: connect(path)), \
                     patch.object(server, "_a_share_session_open", return_value=True):
                 self.assertTrue(server._asset_live_refresh_due("601988"))
-            with patch.object(server, "_a_share_session_open", return_value=False):
-                self.assertFalse(server._asset_live_refresh_due("601988"))
+            with patch.object(server, "connect", lambda: connect(path)), \
+                    patch.object(server, "_a_share_session_open", return_value=False):
+                self.assertTrue(server._asset_live_refresh_due("601988"))
 
     def test_market_refresh_tracks_overview_symbols_and_uses_one_minute_interval(self):
         with tempfile.TemporaryDirectory() as folder:
